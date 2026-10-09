@@ -25,7 +25,7 @@
 
 Сейчас поддерживаются:
 
-- <img src="docs/games/d2r.png" width="28" height="28" align="absmiddle" alt=""> Diablo II: Resurrected
+- <img src="docs/games/d2r.png" width="28" height="28" align="absmiddle" alt=""> Diablo II: Resurrected `только офлайн-персонажи`
 - <img src="docs/games/w3.png" width="28" height="28" align="absmiddle" alt=""> The Witcher 3
 - <img src="docs/games/sacred.png" width="28" height="28" align="absmiddle" alt=""> Sacred Gold
 - <img src="docs/games/s2.png" width="28" height="28" align="absmiddle" alt=""> Sacred 2
