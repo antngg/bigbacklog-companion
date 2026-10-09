@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>BigBacklog Companion</title>
+<style>
+  @font-face { font-family: "Ubuntu"; font-weight: 400; src: url("fonts/ubuntu-latin-400.woff2") format("woff2"); unicode-range: U+0000-00FF, U+2000-206F; }
+  @font-face { font-family: "Ubuntu"; font-weight: 400; src: url("fonts/ubuntu-cyrillic-400.woff2") format("woff2"); unicode-range: U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
+  @font-face { font-family: "Ubuntu"; font-weight: 700; src: url("fonts/ubuntu-latin-700.woff2") format("woff2"); unicode-range: U+0000-00FF, U+2000-206F; }
+  @font-face { font-family: "Ubuntu"; font-weight: 700; src: url("fonts/ubuntu-cyrillic-700.woff2") format("woff2"); unicode-range: U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
+  html, body { margin: 0; background: #0e1218; color: #e8edf2; font: 14px/1.4 "Ubuntu", "Segoe UI", sans-serif; }
+  body { padding: 20px 22px; }
+  h1 { margin: 0 0 4px; font-size: 17px; }
+  p.hint { margin: 0 0 14px; color: #93a1ae; font-size: 12.5px; }
+  #dev { margin-top: 18px; border-top: 1px solid rgba(255, 255, 255, 0.08); padding-top: 4px; }
+  label { display: block; margin: 12px 0 5px; font-size: 12.5px; color: #93a1ae; }
+  input {
+    box-sizing: border-box; width: 100%; padding: 9px 11px; border-radius: 7px;
+    border: 1px solid rgba(255, 255, 255, 0.14); background: rgba(255, 255, 255, 0.05);
+    color: inherit; font: inherit; outline: none;
+  }
+  input:focus { border-color: #3fd8c7; }
+  button {
+    padding: 9px 18px; border-radius: 7px; border: 0; cursor: pointer;
+    background: #3fd8c7; color: #06201d; font: 700 13.5px "Ubuntu", sans-serif;
+  }
+  button:disabled { opacity: 0.6; cursor: default; }
+  .status { font-size: 12.5px; color: #93a1ae; }
+  .status.ok { color: #7ceadd; }
+  .status.error { color: #ff8a8a; }
+  /* Код привязки: крупно, по буквам, как в плагине Деки */
+  .pair { display: flex; align-items: center; gap: 16px; margin: 4px 0 6px; }
+  .code { display: flex; gap: 6px; }
+  .code span {
+    width: 44px; height: 54px; display: grid; place-items: center; border-radius: 8px;
+    background: rgba(63, 216, 199, 0.1); border: 1px solid rgba(63, 216, 199, 0.45);
+    font: 700 28px "Ubuntu", sans-serif; color: #e8edf2;
+  }
+  .code.empty span { background: rgba(255, 255, 255, 0.04); border-color: rgba(255, 255, 255, 0.12); color: #4b5763; }
+</style>
+</head>
+<body>
+  <h1>BigBacklog Companion</h1>
+  <p class="hint">Нажмите «Получить код» и введите его на сайте bigbacklog.online в разделе
+    Настройки, вкладка «Приложение». Приложение подключится само.</p>
+  <div class="pair">
+    <div class="code empty" id="code"><span>·</span><span>·</span><span>·</span><span>·</span></div>
+    <button id="pair">Получить код</button>
+  </div>
+  <div class="status" id="pair-status"></div>
+
+  <!-- Адрес сервера — только для проверок на своем сервере (Ctrl+Shift+S), людям он не нужен:
+       подключение кодом, токен приходит сам. -->
+  <div id="dev" hidden>
+    <label for="server">Адрес сервера</label>
+    <input id="server" spellcheck="false" autocomplete="off" />
+  </div>
+<script>
+  const { invoke } = window.__TAURI__.core;
+  const $ = (id) => document.getElementById(id);
+  let pairTimer = null;
+  let pairSeq = 0;
+
+  invoke("get_config").then((cfg) => {
+    $("server").value = cfg.server || "";
+  });
+
+  function showCode(code) {
+    const box = $("code");
+    box.classList.toggle("empty", !code);
+    box.innerHTML = (code || "····").split("").map((c) => `<span>${c === "·" ? "·" : c}</span>`).join("");
+  }
+
+  function pairStatus(text, kind) {
+    const s = $("pair-status");
+    s.textContent = text;
+    s.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function stopPair() {
+    if (pairTimer) clearTimeout(pairTimer);
+    pairTimer = null;
+  }
+
+  async function startPair() {
+    stopPair();
+    const seq = ++pairSeq;
+    const server = $("server").value;
+    $("pair").disabled = true;
+    pairStatus("Получаю код…");
+    let p;
+    try {
+      p = await invoke("pair_start", { server });
+    } catch (err) {
+      pairStatus("Не вышло: " + err, "error");
+      $("pair").disabled = false;
+      return;
+    }
+    if (seq !== pairSeq) return;
+    showCode(p.code);
+    $("pair").textContent = "Новый код";
+    $("pair").disabled = false;
+    const until = Date.now() + (p.expires_in || 600) * 1000;
+    pairStatus("Введите этот код на сайте. Жду…");
+    const tick = async () => {
+      if (seq !== pairSeq) return;
+      if (Date.now() > until) {
+        showCode("");
+        pairStatus("Код истек. Нажмите «Новый код»", "error");
+        return;
+      }
+      let r;
+      try {
+        r = await invoke("pair_poll", { server, deviceId: p.device_id, secret: p.secret });
+      } catch (err) {
+        r = { status: "pending" };  // сеть мигнула — спросим еще раз
+      }
+      if (seq !== pairSeq) return;
+      if (r.status === "ok" && r.token) {
+        pairStatus("Код принят, подключаюсь…");
+        try {
+          const msg = await invoke("save_config", { server, token: r.token });
+          pairStatus(msg, "ok");
+          setTimeout(() => invoke("close_settings"), 1500);
+        } catch (err) {
+          pairStatus("Не вышло: " + err, "error");
+        }
+        return;
+      }
+      if (r.status === "expired") {
+        showCode("");
+        pairStatus("Код истек. Нажмите «Новый код»", "error");
+        return;
+      }
+      pairTimer = setTimeout(tick, 2000);
+    };
+    pairTimer = setTimeout(tick, 2000);
+  }
+
+  $("pair").addEventListener("click", startPair);
+  document.addEventListener("keydown", (e) => {
+    if (e.ctrlKey && e.shiftKey && e.code === "KeyS") { $("dev").hidden = !$("dev").hidden; e.preventDefault(); }
+  });
+</script>
+</body>
+</html>

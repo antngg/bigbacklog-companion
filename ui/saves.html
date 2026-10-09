@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>BigBacklog Companion — сохранения игр</title>
+<style>
+  @font-face { font-family: "Ubuntu"; font-weight: 400; src: url("fonts/ubuntu-latin-400.woff2") format("woff2"); unicode-range: U+0000-00FF, U+2000-206F; }
+  @font-face { font-family: "Ubuntu"; font-weight: 400; src: url("fonts/ubuntu-cyrillic-400.woff2") format("woff2"); unicode-range: U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
+  @font-face { font-family: "Ubuntu"; font-weight: 700; src: url("fonts/ubuntu-latin-700.woff2") format("woff2"); unicode-range: U+0000-00FF, U+2000-206F; }
+  @font-face { font-family: "Ubuntu"; font-weight: 700; src: url("fonts/ubuntu-cyrillic-700.woff2") format("woff2"); unicode-range: U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
+  html, body { margin: 0; background: #0e1218; color: #e8edf2; font: 14px/1.4 "Ubuntu", "Segoe UI", sans-serif; }
+  body { padding: 18px 20px 20px; }
+  .top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  h1 { margin: 0; font-size: 17px; }
+  .count { color: #93a1ae; font-size: 12.5px; white-space: nowrap; }
+  p.hint { margin: 4px 0 12px; color: #93a1ae; font-size: 12px; }
+  .bar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  .bar input { flex: 1; min-width: 160px; }
+  .chip { padding: 5px 10px; border-radius: 999px; font-size: 12px; }
+  .chip.on { background: rgba(63, 216, 199, 0.16); border-color: #3fd8c7; color: #bff5ee; }
+  .chip span { color: #93a1ae; margin-left: 4px; }
+  .chip.on span { color: #bff5ee; }
+
+  .list { border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 9px; overflow: hidden; background: rgba(255, 255, 255, 0.02); }
+  .group { padding: 6px 12px; font-size: 11.5px; color: #93a1ae; background: rgba(255, 255, 255, 0.03);
+    border-top: 1px solid rgba(255, 255, 255, 0.08); user-select: none; text-transform: uppercase; letter-spacing: .04em; }
+  .group:first-child { border-top: 0; }
+  .group.fold { cursor: pointer; }
+  .group.fold::before { content: "▸"; display: inline-block; width: 14px; transition: transform .12s; }
+  .group.fold.open::before { transform: rotate(90deg); }
+  .group.fold:hover { color: #c9d3dc; }
+  .game + .game, .group + .game { border-top: 1px solid rgba(255, 255, 255, 0.07); }
+  .row { display: flex; align-items: center; gap: 10px; padding: 6px 12px; min-height: 32px; cursor: pointer; }
+  .row:hover { background: rgba(255, 255, 255, 0.04); }
+  .ic { width: 28px; height: 28px; border-radius: 6px; flex: none; object-fit: cover; background: #1b2430; display: grid;
+    place-items: center; font-weight: 700; color: #93a1ae; font-size: 14px; }
+  .who { flex: 1; min-width: 0; }
+  .name { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .st { font-size: 12px; color: #93a1ae; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .st.ok { color: #7fd8a6; }
+  .st.warn { color: #ffb38a; }
+  .chev { color: #5d6b78; width: 12px; text-align: center; transition: transform .12s; }
+  .game.open .chev { transform: rotate(90deg); }
+  .game.off .ic { filter: grayscale(1); opacity: .6; }
+  .more { display: none; padding: 0 12px 12px 50px; }
+  .game.open .more { display: block; }
+  .game.open { background: rgba(255, 255, 255, 0.025); }
+  .line { margin-top: 4px; font-size: 12.5px; color: #93a1ae; word-break: break-all; }
+  .line b { color: #c9d3dc; font-weight: 400; }
+  .line.warn { color: #ffb38a; }
+  .line.sent { margin-top: 1px; padding-left: 10px; }
+  .acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  button { padding: 5px 10px; border-radius: 7px; border: 1px solid rgba(255, 255, 255, 0.14); cursor: pointer;
+    background: rgba(255, 255, 255, 0.05); color: #e8edf2; font: 12px "Ubuntu", sans-serif; }
+  button:hover { border-color: #3fd8c7; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .edit { display: none; gap: 8px; margin-top: 8px; }
+  .edit.on { display: flex; }
+  input { box-sizing: border-box; padding: 6px 9px; border-radius: 7px; border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.05); color: inherit; font: 12.5px "Ubuntu", sans-serif; outline: none; }
+  .edit input { flex: 1; }
+  input:focus { border-color: #3fd8c7; }
+  .empty { padding: 16px 12px; color: #93a1ae; font-size: 12.5px; }
+  .find-hint { padding: 10px 12px 12px; color: #7d8a96; font-size: 11.5px; border-top: 1px solid rgba(255, 255, 255, 0.07); }
+  /* переключатель */
+  .sw { position: relative; display: inline-flex; align-items: center; cursor: pointer; flex: none; }
+  .sw input { display: none; }
+  .sw i { width: 36px; height: 20px; border-radius: 10px; background: rgba(255, 255, 255, 0.15); position: relative; transition: background .15s; }
+  .sw i::after { content: ""; position: absolute; left: 2px; top: 2px; width: 16px; height: 16px; border-radius: 50%; background: #e8edf2; transition: left .15s; }
+  .sw input:checked + i { background: #3fd8c7; }
+  .sw input:checked + i::after { left: 18px; }
+  .sw input:disabled + i { opacity: .5; }
+  #status { min-height: 18px; font-size: 12.5px; color: #93a1ae; margin-top: 8px; }
+  #status.error { color: #ff8a8a; }
+</style>
+</head>
+<body>
+  <div class="top"><h1>Сохранения игр</h1><span class="count" id="count"></span></div>
+  <p class="hint">После каждой игры приложение отправляет на сайт ее сохранения, только у игр, где отправка включена. Больше ничего с компьютера не уходит.</p>
+  <div class="bar">
+    <input id="q" placeholder="Найти игру" spellcheck="false" autocomplete="off">
+    <button class="chip" data-f="all">Все<span id="n-all"></span></button>
+    <button class="chip" data-f="on">Включено<span id="n-on"></span></button>
+  </div>
+  <div class="list" id="list"></div>
+  <div id="status"></div>
+<script>
+  const { invoke } = window.__TAURI__.core;
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const when = (ms) => new Date(ms).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const files = (n) => `${n} ${n % 10 === 1 && n % 100 !== 11 ? "файл" : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? "файла" : "файлов"}`;
+  // Особые пояснения по игре — строкой в раскрытой карточке.
+  const NOTES = {
+    d2r: "Отправляются офлайн-персонажи и общий тайник. Онлайновые персонажи хранятся на серверах Blizzard, их файлов на компьютере нет",
+    cp77: "У каждого прохождения отправляется только самое свежее сохранение, вместе с его снимком экрана",
+  };
+  const SENT_SHOWN = 4;
+  const editing = new Set();
+  const open = new Set();
+  let filter = "all", last = null;
+
+  // Коротко о состоянии игры одной строкой под названием.
+  function status(g) {
+    if (!g.found) return [g.enabled ? "warn" : "", g.custom ? "Своя папка недоступна" : "Не найдена на этом компьютере"];
+    if (g.sent.length) {
+      const t = Math.max(...g.sent.map((f) => f.mtime));
+      return ["ok", `Отправлено ${when(t)}${g.sent.length > 1 ? `, ${files(g.sent.length)}` : ""}`];
+    }
+    return ["", g.enabled ? "Включено, еще ничего не отправлялось" : ""];
+  }
+
+  function gameHtml(g, known) {
+    const [cls, text] = status(g);
+    const isOpen = open.has(g.id) || editing.has(g.id);
+    const sent = g.sent.slice(0, SENT_SHOWN);
+    return `<div class="game ${isOpen ? "open" : ""} ${g.enabled ? "" : "off"}" data-id="${g.id}">
+      <div class="row" data-act="expand">
+        ${g.icon ? `<img class="ic" src="${g.icon}" alt="">` : `<span class="ic">${esc(g.name.slice(0, 1))}</span>`}
+        <div class="who"><div class="name">${esc(g.name)}</div>${text ? `<div class="st ${cls}">${esc(text)}</div>` : ""}</div>
+        <label class="sw"><input type="checkbox" data-act="toggle" ${g.enabled ? "checked" : ""} ${known ? "" : "disabled"}><i></i></label>
+        <span class="chev">›</span>
+      </div>
+      <div class="more">
+        ${g.found ? `<div class="line">Папка <b>${esc(g.dir)}</b>${g.custom ? " (своя)" : ""}</div>`
+          : `<div class="line warn">Папка с сохранениями не найдена${g.custom ? `, своя папка <b>${esc(g.custom)}</b> недоступна` : ""}. Если игра стоит не там, где обычно, укажите папку</div>`}
+        ${sent.length ? `<div class="line">Отправлено на сайт</div>${sent.map((f) => `<div class="line sent"><b>${esc(f.file)}</b>, ${esc(f.kind)}, файл от ${when(f.mtime)}</div>`).join("")}
+          ${g.sent.length > SENT_SHOWN ? `<div class="line sent">и еще ${files(g.sent.length - SENT_SHOWN)}</div>` : ""}` : ""}
+        ${NOTES[g.id] ? `<div class="line">${esc(NOTES[g.id])}</div>` : ""}
+        <div class="acts">
+          <button data-act="now" ${g.enabled && g.found ? "" : "disabled"}>Отправить сейчас</button>
+          <button data-act="open" ${g.found ? "" : "disabled"}>Открыть папку</button>
+          <button data-act="edit">Указать папку</button>
+          ${g.custom ? `<button data-act="reset">Папка по умолчанию</button>` : ""}
+        </div>
+        <div class="edit ${editing.has(g.id) ? "on" : ""}"><input value="${esc(g.custom || g.dir || g.default || "")}" spellcheck="false">
+          <button data-act="save">Сохранить</button></div>
+      </div>
+    </div>`;
+  }
+
+  function render(data) {
+    last = data;
+    if (!data.known) $("status").textContent = "Жду ответа сайта, переключатели появятся через несколько секунд";
+    else if (!$("status").classList.contains("error")) $("status").textContent = "";
+    // Игры, которых нет на этом компьютере, в списке не нужны. Остаются включенные (пропала папка,
+    // отправка встала, об этом надо сказать), а остальные находятся только поиском: чтобы указать
+    // папку игре, стоящей не там, где обычно.
+    const all = data.games.filter((g) => g.found || g.enabled);
+    const hidden = data.games.length - all.length;
+    const on = all.filter((g) => g.enabled).length;
+    $("count").textContent = `Включено ${on} из ${all.length}`;
+    $("n-all").textContent = all.length;
+    $("n-on").textContent = on;
+    document.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", c.dataset.f === filter));
+    const q = $("q").value.trim().toLowerCase();
+    const pool = q ? data.games : all;
+    const list = pool.filter((g) => (filter === "all" || g.enabled) && (!q || g.name.toLowerCase().includes(q)));
+    // Группы: отправляются, есть на компьютере, не найдены (только при поиске).
+    list.sort((a, b) => a.name.localeCompare(b.name));
+    const groups = [["on", "Отправляются", list.filter((g) => g.enabled)],
+                    ["here", "Есть на компьютере", list.filter((g) => !g.enabled && g.found)],
+                    ["away", "Не найдены на этом компьютере", list.filter((g) => !g.enabled && !g.found)]];
+    const empty = q ? "Ничего не нашлось" : "На этом компьютере пока нет игр, чьи сохранения умеет читать сайт";
+    $("list").innerHTML = (!list.length ? `<div class="empty">${empty}</div>`
+      : groups.filter(([, , gs]) => gs.length).map(([, title, gs]) =>
+        `<div class="group open">${title}, ${gs.length}</div>${gs.map((g) => gameHtml(g, data.known)).join("")}`).join(""))
+      + (hidden && !q && filter === "all"
+        ? `<div class="find-hint">Игра стоит не там, где обычно? Найдите ее по названию и укажите папку</div>` : "");
+  }
+
+  async function load() { render(await invoke("get_saves")); }
+
+  $("q").addEventListener("input", () => last && render(last));
+  document.querySelector(".bar").addEventListener("click", (e) => {
+    const c = e.target.closest(".chip");
+    if (!c) return;
+    filter = c.dataset.f;
+    if (last) render(last);
+  });
+
+  $("list").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-act]");
+    if (!b || b.tagName === "LABEL") return;
+    const act = b.dataset.act;
+    // Клик по переключателю и полю правки не раскрывает строку.
+    if (act === "expand" && e.target.closest(".sw")) return;
+    const id = b.closest(".game").dataset.id;
+    $("status").className = "";
+    try {
+      if (act === "expand") { open.has(id) ? open.delete(id) : open.add(id); render(last); }
+      else if (act === "toggle") render(await invoke("set_save_sync", { id, on: b.checked }));
+      else if (act === "now") { render(await invoke("send_save_now", { id })); $("status").textContent = "Отправлю в ближайшие секунды, если игра закрыта"; }
+      else if (act === "open") await invoke("open_save_dir", { id });
+      else if (act === "edit") { editing.has(id) ? editing.delete(id) : editing.add(id); open.add(id); render(last); }
+      else if (act === "reset") render(await invoke("set_save_dir", { id, path: "" }));
+      else if (act === "save") {
+        const path = b.closest(".game").querySelector(".edit input").value;
+        editing.delete(id);
+        render(await invoke("set_save_dir", { id, path }));
+      }
+    } catch (err) {
+      $("status").textContent = "Не вышло: " + err;
+      $("status").className = "error";
+      load();
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if ($("q").value) { $("q").value = ""; render(last); return; }
+    invoke("close_saves");
+  });
+  load();
+  // Свежие флаги и «последнее отправленное»; пока правят путь — не перерисовываем.
+  setInterval(() => { if (!editing.size) load(); }, 5000);
+</script>
+</body>
+</html>

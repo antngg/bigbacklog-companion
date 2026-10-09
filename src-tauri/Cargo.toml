@@ -1,0 +1,43 @@
+[package]
+name = "bigbacklog-agent"
+version = "0.2.81"
+description = "Big Backlog Agent — тосты опыта и квестов поверх игр"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+# Сертификаты HTTPS: встроенные плюс хранилище Windows (src/tls.rs) — та же rustls, что у ureq.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+rustls-native-certs = "0.8"
+winreg = "0.55"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# Агент живёт в трее весь день — собираем маленьким.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[features]
+# Сборка владельца: тестовые плашки и оверлей в меню трея, самообновление из канала dev.
+dev = []

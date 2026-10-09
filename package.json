@@ -1,0 +1,13 @@
+{
+  "name": "bigbacklog-companion",
+  "private": true,
+  "version": "0.2.81",
+  "scripts": {
+    "tauri": "tauri",
+    "build": "tauri build",
+    "dev": "tauri dev"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

@@ -1,0 +1,46 @@
+# Сборка exe на GitHub: на каждый тег v* — выпуск с exe и подтверждением происхождения (кто, из какого
+# коммита и каким процессом собрал файл); вручную — просто exe в артефактах прогона.
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npx tauri build --no-bundle
+      - name: exe с версией в имени
+        shell: pwsh
+        run: |
+          $ver = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          Copy-Item src-tauri/target/release/bigbacklog-agent.exe "BigBacklogCompanion-$ver.exe"
+          (Get-FileHash "BigBacklogCompanion-$ver.exe" -Algorithm SHA256).Hash.ToLower() | Out-File sha256.txt -Encoding ascii
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: BigBacklogCompanion-*.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BigBacklogCompanion
+          path: |
+            BigBacklogCompanion-*.exe
+            sha256.txt
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            BigBacklogCompanion-*.exe
+            sha256.txt
