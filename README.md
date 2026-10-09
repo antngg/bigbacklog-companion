@@ -23,7 +23,19 @@
 <p align="center"><img src="docs/progress-w3.png" width="760" alt="The Witcher 3, инвентарь"></p>
 <p align="center"><img src="docs/progress-w3-map.png" width="760" alt="The Witcher 3, карта"></p>
 
-Сейчас поддерживаются Diablo II: Resurrected, The Witcher 3, Sacred Gold, Sacred 2, The Binding of Isaac, Risk of Rain 2, Cyberpunk 2077, Megabonk, The Blood of Dawnwalker, Starfield и OpenMW.
+Сейчас поддерживаются:
+
+- <img src="docs/games/d2r.png" width="28" height="28" align="absmiddle" alt=""> Diablo II: Resurrected
+- <img src="docs/games/w3.png" width="28" height="28" align="absmiddle" alt=""> The Witcher 3
+- <img src="docs/games/sacred.png" width="28" height="28" align="absmiddle" alt=""> Sacred Gold
+- <img src="docs/games/s2.png" width="28" height="28" align="absmiddle" alt=""> Sacred 2
+- <img src="docs/games/isaac.png" width="28" height="28" align="absmiddle" alt=""> The Binding of Isaac
+- <img src="docs/games/ror2.png" width="28" height="28" align="absmiddle" alt=""> Risk of Rain 2
+- <img src="docs/games/cp77.png" width="28" height="28" align="absmiddle" alt=""> Cyberpunk 2077
+- <img src="docs/games/megabonk.png" width="28" height="28" align="absmiddle" alt=""> Megabonk
+- <img src="docs/games/dw.png" width="28" height="28" align="absmiddle" alt=""> The Blood of Dawnwalker
+- <img src="docs/games/sf.png" width="28" height="28" align="absmiddle" alt=""> Starfield
+- <img src="docs/games/omw.png" width="28" height="28" align="absmiddle" alt=""> OpenMW
 
 ## Установка
 
