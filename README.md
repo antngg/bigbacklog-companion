@@ -5,9 +5,9 @@
 <p align="center">Приложение для Windows к сайту <a href="https://bigbacklog.online">Big Backlog</a>. Живет в трее и работает само, пока вы играете.</p>
 
 <p align="center">
-  <img src="docs/popup-1-session.png" width="560" alt="Итог игровой сессии"><br>
-  <img src="docs/popup-2-xp.png" width="560" alt="Получен опыт"><br>
-  <img src="docs/popup-3-quest.png" width="560" alt="Квест выполнен">
+  <img src="docs/popup-1-session-w3.png" width="560" alt="Итог игровой сессии"><br>
+  <img src="docs/popup-2-xp-w3.png" width="560" alt="Получен опыт"><br>
+  <img src="docs/popup-3-quest-w3.png" width="560" alt="Квест выполнен">
 </p>
 
 - **Время в играх** Steam, GOG, Battle.net и эмуляторов уходит на сайт игровыми сессиями.
@@ -32,7 +32,7 @@
 3. Из «Загрузок» или с рабочего стола приложение само переедет в `%LOCALAPPDATA%\BigBacklog Companion`.
 4. Нажмите **«Получить код»** и введите 4 символа на сайте во вкладке **«Приложение»**. Паролей и токенов вручную не нужно.
 
-<p align="center"><img src="docs/site-devices.png" width="760" alt="Вкладка «Приложение» на сайте"></p>
+<p align="center"><img src="docs/site-devices-w3.png" width="760" alt="Вкладка «Приложение» на сайте"></p>
 
 Нужны Windows 10 или 11 (x64) и Microsoft WebView2 (в Windows 11 есть всегда; если его нет, приложение предложит скачать).
 
@@ -46,7 +46,7 @@
 
 **Сохранения.** По умолчанию ничего не отправляется: отправку включают для каждой игры отдельно. Приложение читает только папку сохранений этой игры и только ее файлы, после выхода из игры, и шлет только изменившиеся. OpenMW синхронизируется между устройствами: по одному последнему сохранению на персонажа, удаленное на сайте убирается в `.bigbacklog_deleted`, а не стирается.
 
-<p align="center"><img src="docs/saves.png" width="560" alt="Окно «Сохранения игр»"></p>
+<p align="center"><img src="docs/saves-w3.png" width="560" alt="Окно «Сохранения игр»"></p>
 
 **Свои достижения.** Для игр без достижений у Big Backlog есть моды с ними (Sacred Gold, OpenMW). Мод кладет события в `%APPDATA%\BigBacklogAgent\inbox` (у OpenMW это строки `[BBACH]` в его журнале), приложение отправляет их и удаляет. Без мода папка пуста.
 
