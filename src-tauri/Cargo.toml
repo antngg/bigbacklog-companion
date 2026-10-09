@@ -1,6 +1,6 @@
 [package]
 name = "bigbacklog-agent"
-version = "0.2.81"
+version = "0.2.82"
 description = "Big Backlog Agent — тосты опыта и квестов поверх игр"
 edition = "2021"
 
@@ -23,6 +23,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Recovery",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_System_Time",

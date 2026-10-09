@@ -1,7 +1,7 @@
 {
   "name": "bigbacklog-companion",
   "private": true,
-  "version": "0.2.81",
+  "version": "0.2.82",
   "scripts": {
     "tauri": "tauri",
     "build": "tauri build",

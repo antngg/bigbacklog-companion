@@ -340,6 +340,8 @@ struct Shared {
     /// Слежение за играми включено (пункт меню трея).
     tracking: AtomicBool,
     now_item: Mutex<Option<MenuItem<tauri::Wry>>>,
+    /// Галка «Запускать вместе с Windows»: первая привязка включает автозапуск сама (save_config).
+    autostart_item: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
     /// Пункт «Подключение…» и есть ли он сейчас в меню: после подключения он не нужен,
     /// возвращается, когда подключения нет или его отозвали (set_connected).
     connect_item: Mutex<Option<(Menu<tauri::Wry>, MenuItem<tauri::Wry>, bool)>>,
@@ -370,6 +372,7 @@ impl Shared {
             tracker: Mutex::new(Tracker::default()),
             tracking: AtomicBool::new(true),
             now_item: Mutex::new(None),
+            autostart_item: Mutex::new(None),
             connect_item: Mutex::new(None),
             recent: Mutex::new(RecentMenu::default()),
             assets: Mutex::new(load_assets()),
@@ -476,11 +479,12 @@ fn ui_step(what: &'static str) {
 }
 
 /// Раз в WATCH_EVERY шлет главному потоку пустое дело и ждет, что тот его выполнит. Молчит больше
-/// WATCH_LOG — пишет в журнал, на каком шаге (ui_step); больше WATCH_RESTART — перезапускает
+/// WATCH_LOG — пишет в журнал, на каком шаге (ui_step): Windows считает окно зависшим уже через 5 с
+/// и может закрыть процесс раньше, чем сработает перезапуск. Больше WATCH_RESTART — перезапускает
 /// приложение (новая копия ждет выхода этой по --wait-pid). Время считается тиками по секунде, а не
 /// часами: после сна компьютера ложного «зависания» не будет.
 const WATCH_EVERY: u32 = 15;
-const WATCH_LOG: u32 = 20;
+const WATCH_LOG: u32 = 5;
 const WATCH_RESTART: u32 = 60;
 
 fn main_watchdog(app: AppHandle) {
@@ -895,6 +899,15 @@ mod win {
         SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     };
 
+    /// Перезапуск после падения или зависания силами Windows (WER). Не после обновления Windows и
+    /// не после перезагрузки: там поднимет автозапуск, иначе вышло бы две копии.
+    pub fn register_restart() {
+        use windows_sys::Win32::System::Recovery::{RegisterApplicationRestart, RESTART_NO_PATCH, RESTART_NO_REBOOT};
+        unsafe {
+            RegisterApplicationRestart(std::ptr::null(), RESTART_NO_PATCH | RESTART_NO_REBOOT);
+        }
+    }
+
     /// Тот же сигнал, по которому Windows сама глушит уведомления в играх.
     pub fn exclusive_fullscreen() -> bool {
         let mut state = 0;
@@ -1198,7 +1211,29 @@ fn save_config(server: String, token: String, state: tauri::State<'_, Arc<Shared
     save_poll(&state);
     *state.assets_at.lock().unwrap() = None; // другой сервер — свой вид плашек
     state.wake_poll();
+    // Первое подключение: автозапуск включаем сами, иначе после перезагрузки приложения нет, пока
+    // человек не найдет галку в меню трея. Выключить можно той же галкой.
+    if prev.token.trim().is_empty() {
+        enable_autostart(&state);
+    }
     Ok(format!("Подключено: уровень {}", int(&v, "level")))
+}
+
+fn enable_autostart(s: &Shared) {
+    let Some(app) = s.app.lock().unwrap().clone() else { return };
+    let launcher = app.autolaunch();
+    if launcher.is_enabled().unwrap_or(false) {
+        return;
+    }
+    match launcher.enable() {
+        Ok(()) => log("автозапуск включен при первом подключении"),
+        Err(e) => log(&format!("автозапуск не включить: {e}")),
+    }
+    // Замок не держим во время вызова меню (см. 0.2.6).
+    let item = s.autostart_item.lock().unwrap().clone();
+    if let Some(item) = item {
+        let _ = item.set_checked(launcher.is_enabled().unwrap_or(false));
+    }
 }
 
 /// Привязка коротким кодом, как у плагина Деки (app/routers/agent.py, pair_*): агент заводит пару
@@ -2392,6 +2427,7 @@ fn build_tray(app: &AppHandle, s: &Arc<Shared>) -> tauri::Result<()> {
     *s.connect_item.lock().unwrap() = Some((menu.clone(), settings.clone(), true));
     *s.status_item.lock().unwrap() = Some(status);
     *s.now_item.lock().unwrap() = Some(now_item);
+    *s.autostart_item.lock().unwrap() = Some(autostart.clone());
     {
         let mut r = s.recent.lock().unwrap();
         r.menu = Some(menu.clone());
@@ -2505,6 +2541,9 @@ fn main() {
     }
     // Запуск после самообновления: старый процесс еще выходит, ждем его (иначе single-instance).
     update::wait_pid_from_args();
+    // Закрыла Windows (зависание) или упало: Windows сама запустит заново, если процесс прожил
+    // минуту. Сторож процесс не спасет, его закрывают вместе со всем процессом.
+    win::register_restart();
     // Новый человек: без WebView2 окна не откроются — говорим сразу; из «Загрузок» — переезжаем.
     if !install::webview2_ok() {
         log("WebView2 нет, предлагаю установить");
