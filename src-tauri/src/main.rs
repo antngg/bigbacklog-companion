@@ -2438,11 +2438,11 @@ fn recomp_ach_loop(s: Arc<Shared>) {
     let mut trophies = recomp_trophy::load_state();
     let mut trophy_mtimes: HashMap<String, SystemTime> = HashMap::new();
     let mut trophy_failed_at: Option<Instant> = None;
+    let started = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     loop {
         std::thread::sleep(RECOMP_ACH_EVERY);
         let titles = recomp_ach::titles();
-        // Трофеи портов PS4 — пока только в dev-сборке владельца.
-        let ports = if DEV { recomp_trophy::ports() } else { Vec::new() };
+        let ports = recomp_trophy::ports();
         if titles.is_empty() && ports.is_empty() {
             continue;
         }
@@ -2453,7 +2453,7 @@ fn recomp_ach_loop(s: Arc<Shared>) {
         }
         let server = server_of(&cfg);
         if !ports.is_empty() {
-            recomp_trophy_tick(&s, &server, &token, &ports, &mut trophies, &mut trophy_mtimes, &mut trophy_failed_at);
+            recomp_trophy_tick(&s, started, &server, &token, &ports, &mut trophies, &mut trophy_mtimes, &mut trophy_failed_at);
         }
         let mut dirty = false;
         for t in &titles {
@@ -2521,8 +2521,9 @@ fn recomp_ach_loop(s: Arc<Shared>) {
 }
 /// Трофеи рекомпов PS4 (recomp_trophy.rs): лог набора изменился — новое плашкой (как у достижений
 /// Xbox 360: значок трофея, тип вместо G) и полный снимок полученного на сервер (без сети ждет и
-/// уходит позже). Первый раз увиденный лог запоминается молча.
-fn recomp_trophy_tick(s: &Shared, server: &str, token: &str, ports: &[recomp_trophy::Port],
+/// уходит позже). Плашка — только за полученное после запуска приложения (время из лога): старое
+/// при первой находке папки молча, а лог игры, начатой уже при запущенном приложении, — с плашкой.
+fn recomp_trophy_tick(s: &Shared, started: u64, server: &str, token: &str, ports: &[recomp_trophy::Port],
                       state: &mut recomp_trophy::State, mtimes: &mut HashMap<String, SystemTime>,
                       failed_at: &mut Option<Instant>) {
     let mut dirty = false;
@@ -2542,10 +2543,11 @@ fn recomp_trophy_tick(s: &Shared, server: &str, token: &str, ports: &[recomp_tro
             }
             let Ok(text) = std::fs::read_to_string(&path) else { continue };
             mtimes.insert(np.clone(), mtime);
-            let first = !state.sets.contains_key(np);
             let st = state.sets.entry(np.clone()).or_default();
-            let fresh = recomp_ach::absorb(st, first, recomp_trophy::parse_log(&text));
-            dirty |= first || !st.sent;
+            let unlocked = recomp_trophy::parse_log(&text);
+            let fresh: Vec<u32> = recomp_ach::absorb(st, false, unlocked.clone()).into_iter()
+                .filter(|id| recomp_trophy::popup_due(unlocked.get(id).copied(), started)).collect();
+            dirty |= !st.sent;
             if fresh.is_empty() {
                 continue;
             }

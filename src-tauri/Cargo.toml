@@ -1,6 +1,6 @@
 [package]
 name = "bigbacklog-agent"
-version = "0.2.95"
+version = "0.2.96"
 description = "Big Backlog Agent — тосты опыта и квестов поверх игр"
 edition = "2021"
 

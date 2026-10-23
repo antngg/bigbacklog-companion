@@ -66,6 +66,15 @@ pub fn parse_log(text: &str) -> BTreeMap<u32, u64> {
     out
 }
 
+/// Запас на расхождение часов порта и приложения.
+const POPUP_SLACK_SECS: u64 = 60;
+
+/// Плашка за трофей — только если он получен после запуска приложения: полученное раньше
+/// (при первой находке папки, после перерыва) уходит на сайт молча.
+pub fn popup_due(at: Option<u64>, started: u64) -> bool {
+    at.is_some_and(|t| t + POPUP_SLACK_SECS >= started)
+}
+
 /// Папка `trophy`, выбранная человеком в лаунчере (ключ настроек не пустой).
 fn from_settings(file: &str, key: &str) -> Option<PathBuf> {
     let path = expand(file).into_iter().next()?;
@@ -140,6 +149,15 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[&5], 1_792_700_000);
         assert_eq!(got[&12], 1_792_800_000);
+    }
+
+    #[test]
+    fn popup_only_for_trophies_after_start() {
+        let started = 1_792_798_600;
+        assert!(popup_due(Some(1_792_798_954), started));
+        assert!(popup_due(Some(started - 30), started));
+        assert!(!popup_due(Some(1_792_793_619), started));
+        assert!(!popup_due(None, started));
     }
 
     #[test]
