@@ -45,6 +45,7 @@ mod openmw;
 mod omwlog;
 mod recomp_ach;
 mod recomp_saves;
+mod recomp_trophy;
 mod specs;
 mod install;
 mod tls;
@@ -719,6 +720,7 @@ fn on_state(s: &Shared, state: Value) {
     saves::set_flags_from_state(&state);
     scan::set_recomp_from_state(&state);
     recomp_ach::set_from_state(&state);
+    recomp_trophy::set_from_state(&state);
     recomp_saves::set_from_state(&state);
     let right = if state.get("max_level").and_then(|m| m.as_bool()).unwrap_or(false) {
         "MAX".to_string()
@@ -2433,10 +2435,15 @@ fn recomp_ach_loop(s: Arc<Shared>) {
     let mut state = recomp_ach::load_state();
     let mut mtimes: HashMap<String, SystemTime> = HashMap::new();
     let mut failed_at: Option<Instant> = None;
+    let mut trophies = recomp_trophy::load_state();
+    let mut trophy_mtimes: HashMap<String, SystemTime> = HashMap::new();
+    let mut trophy_failed_at: Option<Instant> = None;
     loop {
         std::thread::sleep(RECOMP_ACH_EVERY);
         let titles = recomp_ach::titles();
-        if titles.is_empty() {
+        // Трофеи портов PS4 — пока только в dev-сборке владельца.
+        let ports = if DEV { recomp_trophy::ports() } else { Vec::new() };
+        if titles.is_empty() && ports.is_empty() {
             continue;
         }
         let cfg = s.cfg.lock().unwrap().clone();
@@ -2445,6 +2452,9 @@ fn recomp_ach_loop(s: Arc<Shared>) {
             continue;
         }
         let server = server_of(&cfg);
+        if !ports.is_empty() {
+            recomp_trophy_tick(&s, &server, &token, &ports, &mut trophies, &mut trophy_mtimes, &mut trophy_failed_at);
+        }
         let mut dirty = false;
         for t in &titles {
             let Some((path, mtime)) = recomp_ach::find_file(t, scan::recomp_path) else { continue };
@@ -2509,6 +2519,82 @@ fn recomp_ach_loop(s: Arc<Shared>) {
         }
     }
 }
+/// Трофеи рекомпов PS4 (recomp_trophy.rs): лог набора изменился — новое плашкой (как у достижений
+/// Xbox 360: значок трофея, тип вместо G) и полный снимок полученного на сервер (без сети ждет и
+/// уходит позже). Первый раз увиденный лог запоминается молча.
+fn recomp_trophy_tick(s: &Shared, server: &str, token: &str, ports: &[recomp_trophy::Port],
+                      state: &mut recomp_trophy::State, mtimes: &mut HashMap<String, SystemTime>,
+                      failed_at: &mut Option<Instant>) {
+    let mut dirty = false;
+    for p in ports {
+        let Some(dir) = recomp_trophy::find_dir(p, state.dirs.get(&p.slug), scan::recomp_path) else { continue };
+        let dir_text = dir.to_string_lossy().to_string();
+        if state.dirs.get(&p.slug) != Some(&dir_text) {
+            log(&format!("трофеи {}: папка {}", p.slug, dir.display()));
+            state.dirs.insert(p.slug.clone(), dir_text);
+            dirty = true;
+        }
+        for np in &p.sets {
+            let path = dir.join(format!("{np}.log"));
+            let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) else { continue };
+            if mtimes.get(np) == Some(&mtime) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            mtimes.insert(np.clone(), mtime);
+            let first = !state.sets.contains_key(np);
+            let st = state.sets.entry(np.clone()).or_default();
+            let fresh = recomp_ach::absorb(st, first, recomp_trophy::parse_log(&text));
+            dirty |= first || !st.sent;
+            if fresh.is_empty() {
+                continue;
+            }
+            if st.names.is_empty() {
+                match get_json(server, token, &format!("/api/agent/recomp-trophies?np={np}")) {
+                    Ok(v) => {
+                        if let Some(names) = v.get("names").and_then(|n| n.as_object()) {
+                            st.names = names.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        }
+                    }
+                    Err(e) => log(&format!("трофеи {np}: названий нет ({})", e.message())),
+                }
+            }
+            let paused = s.paused.load(Ordering::SeqCst);
+            for id in fresh {
+                let a = st.names.get(&id.to_string()).cloned()
+                    .unwrap_or_else(|| json!({"name": "Трофей игры", "desc": "", "tier": "bronze"}));
+                log(&format!("трофей {np} #{id} {}{}", a["name"].as_str().unwrap_or(""),
+                             if paused { " — плашки на паузе" } else { "" }));
+                if !paused {
+                    s.pending.lock().unwrap().push_back(json!({"type": "achievement", "achievement": a}));
+                }
+            }
+        }
+    }
+    let retry = failed_at.map(|at| at.elapsed() >= RECOMP_ACH_RETRY).unwrap_or(true);
+    if dirty || retry {
+        for (np, st) in state.sets.iter_mut().filter(|(_, st)| !st.sent) {
+            let unlocked: Vec<Value> = st.unlocked.iter().map(|(id, at)| json!({"id": id, "at": at})).collect();
+            match post_json(server, token, "/api/agent/recomp-trophies", &json!({"np": np, "unlocked": unlocked})) {
+                Ok(_) => {
+                    st.sent = true;
+                    *failed_at = None;
+                    dirty = true;
+                }
+                Err(e) => {
+                    if failed_at.is_none() {
+                        log(&format!("трофеи {np} не ушли: {}", e.message()));
+                    }
+                    *failed_at = Some(Instant::now());
+                }
+            }
+        }
+    }
+    if dirty {
+        recomp_trophy::save_state(state);
+    }
+}
+
 /// Отправка входящих идёт — следующий такт новую не запускает.
 static INBOX_BUSY: AtomicBool = AtomicBool::new(false);
 /// Последняя ошибка отправки: одна и та же пишется в журнал один раз.
