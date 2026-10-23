@@ -11,9 +11,10 @@
 //! поток опроса, WebView2 не живёт), прозрачное, не ловит мышь и не
 //! активируется: показ идёт через ShowWindow(SW_SHOWNOACTIVATE), а не через
 //! window.show(), — игра в оконном или безрамочном режиме фокус не теряет.
-//! Плашки идут строго по одной. Пока Windows сообщает эксклюзивный
-//! полноэкранный режим (старые DX9-игры), они копятся и показываются после
-//! выхода из игры — по очереди, а не друг на друге.
+//! Плашки идут строго по одной. В сборке для людей опыт и квесты копятся,
+//! пока идет игра, и после выхода приходят одним итогом; dev-сборка показывает
+//! их сразу. Пока Windows сообщает эксклюзивный полноэкранный режим (старые
+//! DX9-игры), копятся в обеих и показываются после выхода — по очереди.
 //!
 //! В Steam Big Picture с плагином Decky плашки показывает плагин —
 //! уведомлением Steam, как на Деке: агент отдаёт ему плашку файлом
@@ -23,14 +24,14 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, PhysicalPosition, RunEvent, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
@@ -39,8 +40,11 @@ mod cp77;
 mod d2r;
 mod inbox;
 mod isaac;
+mod mw2;
 mod openmw;
 mod omwlog;
+mod recomp_ach;
+mod recomp_saves;
 mod specs;
 mod install;
 mod tls;
@@ -48,8 +52,10 @@ mod update;
 mod ror2;
 mod s2;
 mod sacred;
+mod sacred_swap;
 mod saves;
 mod scan;
+mod steamschema;
 mod w3;
 mod xbox360;
 
@@ -349,6 +355,8 @@ struct Shared {
     assets: Mutex<Assets>,
     /// Когда вид плашек последний раз сверялся с сервером.
     assets_at: Mutex<Option<Instant>>,
+    /// Подсказка значка в трее: статус (уровень и опыт) и текущая игра с временем сессии.
+    tip: Mutex<(String, String)>,
 }
 
 impl Shared {
@@ -377,6 +385,7 @@ impl Shared {
             recent: Mutex::new(RecentMenu::default()),
             assets: Mutex::new(load_assets()),
             assets_at: Mutex::new(None),
+            tip: Mutex::new((String::new(), String::new())),
         }
     }
 
@@ -427,12 +436,32 @@ impl Shared {
             ui_step("строка статуса");
             let _ = item.set_text(text);
         }
+        self.tip.lock().unwrap().0 = text.to_string();
+        self.refresh_tip();
+    }
+
+    /// Текущая игра для подсказки значка: «Forza Horizon 1 ч 5 мин», пустая — не играешь.
+    fn set_tip_game(&self, game: &str) {
+        {
+            let mut tip = self.tip.lock().unwrap();
+            if tip.1 == game {
+                return;
+            }
+            tip.1 = game.to_string();
+        }
+        self.refresh_tip();
+    }
+
+    fn refresh_tip(&self) {
+        let text = {
+            let tip = self.tip.lock().unwrap();
+            tray_tip(&tip.0, &tip.1)
+        };
         let app = self.app.lock().unwrap().clone();
         if let Some(app) = app {
             ui_step("подсказка значка");
             if let Some(tray) = app.tray_by_id("tray") {
-                let dev = if DEV { " dev" } else { "" };
-                let _ = tray.set_tooltip(Some(format!("BigBacklog Companion {}{dev} · {text}", update::VERSION)));
+                let _ = tray.set_tooltip(Some(text));
             }
         }
     }
@@ -530,6 +559,29 @@ fn num(n: i64) -> String {
 
 fn int(v: &Value, key: &str) -> i64 {
     v.get(key).and_then(|x| x.as_i64()).unwrap_or(0)
+}
+
+/// Подсказка значка в трее, коротко: «BBLC 0.2.89 dev · lvl 21 · 767 / 965 XP · Forza Horizon 42 мин».
+/// Windows режет подсказку на 127 символах, поэтому длинное название игры укорачивается.
+fn tray_tip(status: &str, game: &str) -> String {
+    const MAX: usize = 127;
+    let dev = if DEV { " dev" } else { "" };
+    let mut tip = format!("BBLC {}{dev}", update::VERSION);
+    if !status.is_empty() {
+        tip.push_str(" · ");
+        tip.push_str(&status.replacen("уровень ", "lvl ", 1));
+    }
+    if !game.is_empty() {
+        let room = MAX.saturating_sub(tip.chars().count() + 3);
+        let game: String = if game.chars().count() > room {
+            game.chars().take(room.saturating_sub(1)).collect::<String>() + "…"
+        } else {
+            game.to_string()
+        };
+        tip.push_str(" · ");
+        tip.push_str(&game);
+    }
+    tip
 }
 
 /// «&» в пункте меню Windows — подчёркнутая буква быстрого доступа:
@@ -665,6 +717,9 @@ fn slim(state: &Value) -> Value {
 fn on_state(s: &Shared, state: Value) {
     xbox360::nudge_from_state(&state);
     saves::set_flags_from_state(&state);
+    scan::set_recomp_from_state(&state);
+    recomp_ach::set_from_state(&state);
+    recomp_saves::set_from_state(&state);
     let right = if state.get("max_level").and_then(|m| m.as_bool()).unwrap_or(false) {
         "MAX".to_string()
     } else {
@@ -1058,11 +1113,13 @@ fn present_loop(app: AppHandle, s: Arc<Shared>) {
         if s.pending.lock().unwrap().is_empty() {
             continue;
         }
-        // Опыт, уровень и квесты не мешают игре: копятся и показываются, когда из нее вышли
-        // (подряд идущий опыт take_next склеит в одну плашку). Тестовые и уведомления о самом
-        // приложении идут сразу.
-        let urgent = s.pending.lock().unwrap().front()
-            .map(|d| d.get("test").is_some() || d["type"] == "notice")
+        // Сборка для людей: опыт, уровень и квесты не мешают игре — копятся и показываются, когда
+        // из нее вышли (подряд идущий опыт take_next склеит в одну плашку). Dev-сборка владельца
+        // показывает их прямо в игре (кроме эксклюзивного полноэкранного режима, см. ниже).
+        // Тестовые и уведомления о самом приложении идут сразу в обеих.
+        // Достижение игры — тоже сразу и в обеих: его ради того и показываем, как это делал Xbox 360.
+        let urgent = DEV || s.pending.lock().unwrap().front()
+            .map(|d| d.get("test").is_some() || d["type"] == "notice" || d["type"] == "achievement")
             .unwrap_or(false);
         if !urgent && !s.tracker.lock().unwrap().live.is_empty() {
             continue;
@@ -1473,6 +1530,9 @@ fn track_loop(s: Arc<Shared>) {
     let mut d2r_due = true;
     // Сохранение Sacred Gold: так же, но только когда Sacred.exe не запущен.
     let mut sacred_due = true;
+    // Обмен сохранениями Sacred Gold с Декой и Thor (sacred_swap.rs): кроме тех же поводов —
+    // раз в sacred_swap::EVERY; когда был прошлый.
+    let mut sacred_swap_at: Option<Instant> = None;
     // Сохранение The Witcher 3: так же, пока witcher3.exe не запущен.
     let mut w3_due = true;
     // Сохранения The Binding of Isaac: так же, пока isaac-ng.exe не запущен.
@@ -1488,6 +1548,15 @@ fn track_loop(s: Arc<Shared>) {
     let mut omw_due = true;
     let mut omw_running = false;
     let mut omw_at: Option<Instant> = None;
+    // Прокачка MW2 IW4x (в обе стороны, mw2.rs): так же, как OpenMW, пока iw4x.exe и
+    // iw4mp.exe не запущены; выход из игры замечаем по пропаже процесса.
+    let mut mw2_due = true;
+    let mut mw2_running = false;
+    let mut mw2_at: Option<Instant> = None;
+    // Сохранения портов Xbox 360 из Recomp (recomp_saves.rs): так же, пока порт не запущен.
+    let mut rcs_due = true;
+    let mut rcs_running = false;
+    let mut rcs_at: Option<Instant> = None;
     // Игры из описаний сервера (specs.rs): пора отправить. Новая игра в списке —
     // сразу повод, как старт агента у встроенных.
     let mut spec_due: HashMap<String, bool> = HashMap::new();
@@ -1498,6 +1567,8 @@ fn track_loop(s: Arc<Shared>) {
     let inbox_dir = inbox::dir();
     let _ = std::fs::create_dir_all(&inbox_dir);
     let mut inbox_at: Option<Instant> = None;
+    // Схемы достижений Steam-клиента (steamschema.rs, только dev): когда был прошлый заход.
+    let mut schema_at: Option<Instant> = None;
     loop {
         std::thread::sleep(SCAN_EVERY);
         let dt = last_tick.elapsed().as_secs().min(30);
@@ -1628,6 +1699,7 @@ fn track_loop(s: Arc<Shared>) {
         ror2_due |= saves::take_now("ror2");
         cp77_due |= saves::take_now("cp77");
         omw_due |= saves::take_now("omw");
+        mw2_due |= saves::take_now("mw2");
         // Как у остальных игр: пока D2R.exe жив, ждем (файлы пишет сама игра).
         if d2r_due && saves::enabled("d2r") && !scan::exe_running(d2r::EXE) {
             d2r_due = false;
@@ -1636,14 +1708,29 @@ fn track_loop(s: Arc<Shared>) {
         }
         // Игра пишет файл сама — пока Sacred.exe жив (агент стартовал посреди
         // игры), ждём: отметка остаётся, процессы смотрим только при ней.
-        if sacred_due && saves::enabled("sacred") && !SACRED_BUSY.load(Ordering::SeqCst)
-            && !scan::exe_running(sacred::EXE)
-        {
-            sacred_due = false;
+        // Обмен сохранениями (в обе стороны) и отправка на вкладку «Прогресс» — одним
+        // потоком, по очереди: обе читают папку игры. Обмен — при каждом поводе отправки
+        // и раз в sacred_swap::EVERY (пока игра жива, ждём и его); отправка — только по
+        // своим поводам (sacred_due).
+        // Обмен с Декой и Thor — только в dev-сборке владельца: людям только отправка на «Прогресс».
+        let swap_due = DEV && sacred_swap_at.is_none_or(|t| t.elapsed() >= sacred_swap::EVERY);
+        let sacred_ready = (sacred_due || swap_due) && saves::enabled("sacred")
+            && !SACRED_BUSY.load(Ordering::SeqCst) && !scan::exe_running(sacred::EXE);
+        if sacred_ready && !sacred_due && !sacred_swap::present() {
+            // Игры на этом ПК нет: по таймеру обмена ничего не запускаем, следующая проверка через EVERY.
+            sacred_swap_at = Some(Instant::now());
+        } else if sacred_ready {
+            sacred_swap_at = Some(Instant::now());
+            let send = std::mem::take(&mut sacred_due);
             SACRED_BUSY.store(true, Ordering::SeqCst);
             let (server, token) = (server.clone(), token.clone());
             std::thread::spawn(move || {
-                sacred_sync(&server, &token);
+                if DEV {
+                    sacred_swap::sync(&server, &token);
+                }
+                if send {
+                    sacred_sync(&server, &token);
+                }
                 SACRED_BUSY.store(false, Ordering::SeqCst);
             });
         }
@@ -1730,6 +1817,47 @@ fn track_loop(s: Arc<Shared>) {
                 });
             }
         }
+        // Обмен прокачкой MW2 — только в dev-сборке владельца.
+        if DEV && saves::enabled("mw2") {
+            let running = mw2::running();
+            if mw2_running && !running {
+                mw2_due = true;
+            }
+            mw2_running = running;
+            let periodic = mw2_at.is_none_or(|t| t.elapsed() >= mw2::EVERY);
+            if !running && (mw2_due || periodic) {
+                mw2_due = false;
+                mw2_at = Some(Instant::now());
+                // Папку игры ищем только в срок обмена: в Steam, а не на каждом такте.
+                if mw2::present() && mw2::try_start() {
+                    let (server, token) = (server.clone(), token.clone());
+                    std::thread::spawn(move || {
+                        mw2::sync(&server, &token);
+                        mw2::finish();
+                    });
+                }
+            }
+        }
+        let ports = recomp_saves::ports();
+        if !ports.is_empty() {
+            let running = recomp_saves::running(&ports);
+            if rcs_running && !running {
+                rcs_due = true;
+            }
+            rcs_running = running;
+            let periodic = rcs_at.is_none_or(|t| t.elapsed() >= recomp_saves::EVERY);
+            if !running && (rcs_due || periodic) {
+                rcs_due = false;
+                rcs_at = Some(Instant::now());
+                if recomp_saves::present(&ports) && recomp_saves::try_start() {
+                    let (server, token) = (server.clone(), token.clone());
+                    std::thread::spawn(move || {
+                        recomp_saves::sync(&server, &token);
+                        recomp_saves::finish();
+                    });
+                }
+            }
+        }
         // Свои достижения модов (OpenMW из openmw.log, Sacred Gold через ящик). Сервер принимает их только
         // с фичефлагом agent; при отказе файлы остаются в ящике до следующего раза.
         omwlog::pump(&inbox_dir);
@@ -1744,6 +1872,23 @@ fn track_loop(s: Arc<Shared>) {
                 inbox_sync(&server, &token, &dir);
                 INBOX_BUSY.store(false, Ordering::SeqCst);
             });
+        }
+
+        // Схемы достижений Steam-клиента — только в dev-сборке владельца, не во время игры.
+        if DEV
+            && schema_at.is_none_or(|t| t.elapsed() >= steamschema::EVERY)
+            && !SCHEMA_BUSY.load(Ordering::SeqCst)
+            && s.tracker.lock().unwrap().live.is_empty()
+        {
+            if let Some(dir) = stats_dir.clone() {
+                schema_at = Some(Instant::now());
+                SCHEMA_BUSY.store(true, Ordering::SeqCst);
+                let (server, token, shared) = (server.clone(), token.clone(), s.clone());
+                std::thread::spawn(move || {
+                    steam_schema_sync(&shared, &server, &token, &dir, false);
+                    SCHEMA_BUSY.store(false, Ordering::SeqCst);
+                });
+            }
         }
 
         // Ачивка Steam: файл статистики идущей игры стал новее — просим сервер
@@ -1808,6 +1953,125 @@ fn d2r_sync(server: &str, token: &str) {
     }
     if any {
         d2r::save_sent(&path, &sent);
+    }
+}
+
+/// Отправка схем достижений Steam идёт — следующая не запускается.
+static SCHEMA_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// Подменю «Схемы достижений Steam» (только dev): «Отправить сейчас» и строки истории
+/// заходов. Строки создаются заранее, refresh_schema_menu вставляет нужное их число.
+struct SchemaMenu {
+    menu: Submenu<tauri::Wry>,
+    rows: Vec<MenuItem<tauri::Wry>>,
+    shown: usize,
+}
+
+static SCHEMA_MENU: Mutex<Option<SchemaMenu>> = Mutex::new(None);
+
+fn schema_log_path() -> PathBuf {
+    config_path().with_file_name("steamschema-log.json")
+}
+
+/// Строки истории в подменю: «19.10 01:12 · вручную · схем 3 · достижений +18».
+fn refresh_schema_menu(runs: &[steamschema::Run]) {
+    let mut guard = SCHEMA_MENU.lock().unwrap();
+    let Some(m) = guard.as_mut() else { return };
+    for row in m.rows.iter().take(m.shown) {
+        let _ = m.menu.remove(row);
+    }
+    let lines: Vec<String> = if runs.is_empty() {
+        vec!["Отправок еще не было".to_string()]
+    } else {
+        runs.iter().map(|r| {
+            let when = win::local_time(r.at)
+                .map(|t| format!("{:02}.{:02} {:02}:{:02}", t.day, t.month, t.hour, t.minute))
+                .unwrap_or_default();
+            format!("{when} · {}", steamschema::run_summary(r))
+        }).collect()
+    };
+    m.shown = 0;
+    for (row, line) in m.rows.iter().zip(lines.iter()) {
+        let _ = row.set_text(line);
+        if m.menu.append(row).is_ok() {
+            m.shown += 1;
+        }
+    }
+}
+
+/// Изменившиеся схемы достижений Steam-клиента (steamschema.rs) — на сайт по одной.
+/// По таймеру не больше steamschema::PER_RUN за заход, «Отправить сейчас» — все сразу
+/// и с плашкой-итогом. Ушедшее и то, что сервер не смог прочитать (400), помечается в
+/// steamschema.json; без связи заход кончается и повторится. Заход с отправкой (или
+/// ручной) пишется в историю подменю.
+fn steam_schema_sync(s: &Shared, server: &str, token: &str, dir: &Path, manual: bool) {
+    let path = config_path().with_file_name("steamschema.json");
+    let mut sent = steamschema::load_sent(&path);
+    let todo = steamschema::changed(dir, &sent);
+    let limit = if manual { usize::MAX } else { steamschema::PER_RUN };
+    let mut run = steamschema::Run { manual, ..Default::default() };
+    for (file, appid, mtime) in todo.into_iter().take(limit) {
+        let Ok(body) = std::fs::read(&file) else { continue };
+        let res = tls::agent()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .post(&format!("{server}/api/agent/steam-schema"))
+            .query("appid", &appid)
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("User-Agent", USER_AGENT)
+            .set("Content-Type", "application/octet-stream")
+            .send_bytes(&body);
+        match res {
+            Ok(resp) => {
+                if let Ok(v) = resp.into_json::<Value>() {
+                    let (a, f) = (v["added"].as_i64().unwrap_or(0), v["filled"].as_i64().unwrap_or(0));
+                    if a > 0 || f > 0 {
+                        log(&format!("схема достижений {appid}: +{a} достижений, описаний {f}"));
+                    }
+                    run.added += a;
+                    run.filled += f;
+                }
+            }
+            Err(ureq::Error::Status(400, _)) => log(&format!("схема достижений {appid}: сервер не прочитал файл")),
+            Err(e) => {
+                log(&format!("схемы достижений: отправка прервана ({e})"));
+                run.error = Some(match e {
+                    ureq::Error::Status(code, _) => format!("сервер ответил {code}"),
+                    _ => "нет связи".to_string(),
+                });
+                break;
+            }
+        }
+        sent.insert(appid, mtime);
+        run.files += 1;
+        steamschema::save_sent(&path, &sent);
+        // Темп, а не залп: в первый раз файлов сотни.
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    if run.files == 0 && run.error.is_none() && !manual {
+        return;
+    }
+    run.at = unix_now();
+    log(&format!("схемы достижений: {}", steamschema::run_summary(&run)));
+    refresh_schema_menu(&steamschema::push_run(&schema_log_path(), run.clone()));
+    if manual {
+        let name = if run.files == 0 && run.error.is_none() {
+            "Нового нет".to_string()
+        } else {
+            format!("Ушло схем {}", run.files)
+        };
+        let mut sub: Vec<String> = Vec::new();
+        if run.added > 0 {
+            sub.push(format!("достижений +{}", run.added));
+        }
+        if run.filled > 0 {
+            sub.push(format!("описаний {}", run.filled));
+        }
+        if let Some(e) = &run.error {
+            sub.push(e.clone());
+        }
+        let sub = if sub.is_empty() { "на сайте уже все есть".to_string() } else { sub.join(" · ") };
+        push_notice(s, "Схемы достижений Steam", &name, &sub);
     }
 }
 
@@ -2145,6 +2409,106 @@ fn sacred_stats(server: &str, token: &str, pak: &std::path::Path) {
 }
 
 const INBOX_EVERY: Duration = Duration::from_secs(15);
+
+/// Файл достижений рекомпа проверяется по времени изменения — дешево, поэтому часто: плашка
+/// должна выйти, пока человек еще помнит, за что.
+const RECOMP_ACH_EVERY: Duration = Duration::from_secs(2);
+/// Не дошедший до сервера снимок — повтор не чаще этого.
+const RECOMP_ACH_RETRY: Duration = Duration::from_secs(60);
+
+fn get_json(server: &str, token: &str, path: &str) -> Result<Value, FetchError> {
+    read_response(
+        http()
+            .get(&format!("{server}{path}"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Accept", "application/json")
+            .set("User-Agent", USER_AGENT)
+            .call(),
+    )
+}
+
+/// Родные достижения рекомпов Xbox 360 (recomp_ach.rs): новое в файле порта — плашка, полный
+/// снимок открытого — на сервер (без сети ждет и уходит позже).
+fn recomp_ach_loop(s: Arc<Shared>) {
+    let mut state = recomp_ach::load_state();
+    let mut mtimes: HashMap<String, SystemTime> = HashMap::new();
+    let mut failed_at: Option<Instant> = None;
+    loop {
+        std::thread::sleep(RECOMP_ACH_EVERY);
+        let titles = recomp_ach::titles();
+        if titles.is_empty() {
+            continue;
+        }
+        let cfg = s.cfg.lock().unwrap().clone();
+        let token = cfg.token.trim().to_string();
+        if token.is_empty() {
+            continue;
+        }
+        let server = server_of(&cfg);
+        let mut dirty = false;
+        for t in &titles {
+            let Some((path, mtime)) = recomp_ach::find_file(t, scan::recomp_path) else { continue };
+            if mtimes.get(&t.title_id) == Some(&mtime) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            mtimes.insert(t.title_id.clone(), mtime);
+            let first = !state.contains_key(&t.title_id);
+            let st = state.entry(t.title_id.clone()).or_default();
+            let fresh = recomp_ach::absorb(st, first, recomp_ach::parse_unlocks(&text));
+            if first {
+                log(&format!("достижения {}: нашел {}, открыто {}", t.title_id, path.display(), st.unlocked.len()));
+            }
+            dirty |= first || !fresh.is_empty() || !st.sent;
+            if fresh.is_empty() {
+                continue;
+            }
+            if st.names.is_empty() {
+                match get_json(&server, &token, &format!("/api/agent/recomp-achievements?title_id={}", t.title_id)) {
+                    Ok(v) => {
+                        if let Some(names) = v.get("names").and_then(|n| n.as_object()) {
+                            st.names = names.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        }
+                    }
+                    Err(e) => log(&format!("достижения {}: названий нет ({})", t.title_id, e.message())),
+                }
+            }
+            let paused = s.paused.load(Ordering::SeqCst);
+            for id in fresh {
+                let a = st.names.get(&id.to_string()).cloned()
+                    .unwrap_or_else(|| json!({"name": "Достижение игры", "desc": ""}));
+                log(&format!("достижение {} #{id} {}{}", t.title_id, a["name"].as_str().unwrap_or(""),
+                             if paused { " — плашки на паузе" } else { "" }));
+                if !paused {
+                    s.pending.lock().unwrap().push_back(json!({"type": "achievement", "achievement": a}));
+                }
+            }
+        }
+        let retry = failed_at.map(|at| at.elapsed() >= RECOMP_ACH_RETRY).unwrap_or(true);
+        if dirty || retry {
+            for (tid, st) in state.iter_mut().filter(|(_, st)| !st.sent) {
+                let unlocked: Vec<Value> = st.unlocked.iter().map(|(id, at)| json!({"id": id, "at": at})).collect();
+                let body = json!({"title_id": tid, "unlocked": unlocked});
+                match post_json(&server, &token, "/api/agent/recomp-achievements", &body) {
+                    Ok(_) => {
+                        st.sent = true;
+                        failed_at = None;
+                        dirty = true;
+                    }
+                    Err(e) => {
+                        if failed_at.is_none() {
+                            log(&format!("достижения {tid} не ушли: {}", e.message()));
+                        }
+                        failed_at = Some(Instant::now());
+                    }
+                }
+            }
+        }
+        if dirty {
+            recomp_ach::save_state(&state);
+        }
+    }
+}
 /// Отправка входящих идёт — следующий такт новую не запускает.
 static INBOX_BUSY: AtomicBool = AtomicBool::new(false);
 /// Последняя ошибка отправки: одна и та же пишется в журнал один раз.
@@ -2283,10 +2647,17 @@ fn report(s: &Shared, server: &str, token: &str) {
             .chain(t.finished.iter().map(|v| (v, true)))
             .map(|(v, ended)| json!({
                 "sid": v.sid, "source": v.info.source, "id": v.info.id, "name": v.info.name,
-                // Заголовок окна нужен только эмуляторам (какая в них игра) и Xbox 360 (имя с приставки).
-                "title": if v.info.source == "emu" || v.info.source == xbox360::SOURCE { v.title.clone() } else { None },
+                // Заголовок окна нужен только эмуляторам (какая в них игра), Xbox 360 (имя с приставки)
+                // и Recomp (gk.exe OpenGOAL один на три Jak).
+                "title": if matches!(v.info.source.as_str(), "emu" | "recomp") || v.info.source == xbox360::SOURCE {
+                    v.title.clone()
+                } else {
+                    None
+                },
                 "started_at": v.started, "ended_at": v.last_seen,
                 "active_minutes": v.active_secs / 60, "ended": ended, "base_minutes": v.base_minutes,
+                // Recomp: порты по признаку папки и хэш папки (app/recomp_pick.py на сервере).
+                "ports": v.info.ports, "dir": v.info.dir,
             }))
             .collect();
         (json!({"sessions": rows}), t.finished.len())
@@ -2382,6 +2753,12 @@ fn report(s: &Shared, server: &str, token: &str) {
         })
         .collect();
     s.set_now(&if now.is_empty() { "Сейчас: не играешь".to_string() } else { format!("Сейчас: {}", now.join(", ")) });
+    // В подсказке значка — только первая идущая игра и время ее сессии.
+    let game = live.iter()
+        .find(|g| !g.get("ended").and_then(|e| e.as_bool()).unwrap_or(false))
+        .map(|g| format!("{} {}", g.get("name").and_then(|n| n.as_str()).unwrap_or("?"), duration(int(g, "minutes"))))
+        .unwrap_or_default();
+    s.set_tip_game(&game);
 }
 
 // ---------- Трей ----------
@@ -2405,6 +2782,14 @@ fn build_tray(app: &AppHandle, s: &Arc<Shared>) -> tauri::Result<()> {
     let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
     let autostart = CheckMenuItem::with_id(app, "autostart", "Запускать вместе с Windows", true, autostart_on, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
+    // Схемы достижений Steam (только dev): кнопка и история заходов.
+    let schema_now = MenuItem::with_id(app, "schema_now", "Отправить сейчас", true, None::<&str>)?;
+    let schema_sep = PredefinedMenuItem::separator(app)?;
+    let schema_menu = Submenu::with_id_and_items(app, "schema_menu", "Схемы достижений Steam", true,
+                                                 &[&schema_now, &schema_sep])?;
+    let schema_rows: Vec<MenuItem<tauri::Wry>> = (0..steamschema::HISTORY)
+        .map(|i| MenuItem::with_id(app, format!("schema_run{i}"), "", false, None::<&str>))
+        .collect::<tauri::Result<_>>()?;
     // Строки последних сессий: в меню их вставляет set_recent, когда придёт
     // первый ответ сервера (клик — игра на сайте).
     let recent: Vec<MenuItem<tauri::Wry>> = (0..RECENT_MENU)
@@ -2421,6 +2806,7 @@ fn build_tray(app: &AppHandle, s: &Arc<Shared>) -> tauri::Result<()> {
     items.extend([&sep2 as &dyn tauri::menu::IsMenuItem<tauri::Wry>, &open_site]);
     if DEV {
         items.push(&open_overlay);
+        items.push(&schema_menu);
     }
     items.extend([&settings as &dyn tauri::menu::IsMenuItem<tauri::Wry>, &saves_item, &autostart, &check_update, &sep3, &quit]);
     let menu = Menu::with_items(app, &items)?;
@@ -2428,6 +2814,10 @@ fn build_tray(app: &AppHandle, s: &Arc<Shared>) -> tauri::Result<()> {
     *s.status_item.lock().unwrap() = Some(status);
     *s.now_item.lock().unwrap() = Some(now_item);
     *s.autostart_item.lock().unwrap() = Some(autostart.clone());
+    if DEV {
+        *SCHEMA_MENU.lock().unwrap() = Some(SchemaMenu { menu: schema_menu.clone(), rows: schema_rows, shown: 0 });
+        refresh_schema_menu(&steamschema::load_runs(&schema_log_path()));
+    }
     {
         let mut r = s.recent.lock().unwrap();
         r.menu = Some(menu.clone());
@@ -2437,7 +2827,7 @@ fn build_tray(app: &AppHandle, s: &Arc<Shared>) -> tauri::Result<()> {
     let shared = s.clone();
     TrayIconBuilder::with_id("tray")
         .icon(app.default_window_icon().cloned().expect("иконка приложения"))
-        .tooltip(format!("BigBacklog Companion {}{}", update::VERSION, if DEV { " dev" } else { "" }))
+        .tooltip(tray_tip("", ""))
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(move |app, event| {
@@ -2479,6 +2869,22 @@ fn build_tray(app: &AppHandle, s: &Arc<Shared>) -> tauri::Result<()> {
                     let on = launcher.is_enabled().unwrap_or(false);
                     let _ = if on { launcher.disable() } else { launcher.enable() };
                     let _ = autostart.set_checked(launcher.is_enabled().unwrap_or(false));
+                }
+                "schema_now" => {
+                    let (s, token) = (shared.clone(), shared.cfg.lock().unwrap().token.trim().to_string());
+                    std::thread::spawn(move || {
+                        let Some(dir) = scan::steam_stats_dir().filter(|d| d.is_dir()) else {
+                            push_notice(&s, "Схемы достижений Steam", "Папка Steam не найдена", "appcache\\stats");
+                            return;
+                        };
+                        if token.is_empty() || SCHEMA_BUSY.swap(true, Ordering::SeqCst) {
+                            push_notice(&s, "Схемы достижений Steam", "Отправка уже идет",
+                                        "итог придет, когда она кончится");
+                            return;
+                        }
+                        steam_schema_sync(&s, &server, &token, &dir, true);
+                        SCHEMA_BUSY.store(false, Ordering::SeqCst);
+                    });
                 }
                 "check_update" => {
                     let s = shared.clone();
@@ -2539,8 +2945,15 @@ fn main() {
         scan_report();
         return;
     }
+    // panic = "abort": паника в любом потоке молча гасит весь процесс, без записи и без события
+    // Windows. Пишем ее в журнал, иначе «вылетело» не разобрать.
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current().name().unwrap_or("без имени").to_string();
+        log(&format!("ПАДЕНИЕ {} (поток {thread}): {info}", update::VERSION));
+    }));
     // Запуск после самообновления: старый процесс еще выходит, ждем его (иначе single-instance).
     update::wait_pid_from_args();
+    log(&format!("запуск {}", update::VERSION));
     // Закрыла Windows (зависание) или упало: Windows сама запустит заново, если процесс прожил
     // минуту. Сторож процесс не спасет, его закрывают вместе со всем процессом.
     win::register_restart();
@@ -2590,6 +3003,8 @@ fn main() {
             }
             let track = s.clone();
             std::thread::spawn(move || track_loop(track));
+            let ach = s.clone();
+            std::thread::spawn(move || recomp_ach_loop(ach));
             // Прошитый Xbox 360 — только если адрес задан в конфиге и слежение
             // за играми не на паузе.
             let x360 = s.clone();
@@ -2630,6 +3045,16 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tray_tip_is_short() {
+        let tip = tray_tip("уровень 21 · 767 / 965 XP", "Forza Horizon 1 ч 5 мин");
+        assert!(tip.starts_with("BBLC "));
+        assert!(tip.ends_with(" · lvl 21 · 767 / 965 XP · Forza Horizon 1 ч 5 мин"), "{tip}");
+        let long = tray_tip("уровень 21 · 767 / 965 XP", &"Очень длинное название ".repeat(10));
+        assert!(long.chars().count() <= 127 && long.ends_with('…'), "{long}");
+        assert!(!tray_tip("не подключено — «Подключение…»", "").contains(" · lvl"));
+    }
 
     #[test]
     fn durations_like_the_site() {

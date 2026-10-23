@@ -39,13 +39,14 @@ function done() {
   const build = {
     xp: window.buildXpPopup, quest: window.buildQuestReadyPopup, session: window.buildSessionPopup,
     notice: window.buildNoticePopup, summary: window.buildSummaryPopup,
+    achievement: window.buildAchievementPopup,
   }[d.type];
   if (typeof build !== "function") return done();
   let start;
   try {
     window.popupSetAssetBase(d.server);
     const data = d.type === "quest" ? d.quest || {} : d.type === "session" ? d.session || {}
-      : d.type === "notice" ? d.notice || {} : d;
+      : d.type === "notice" ? d.notice || {} : d.type === "achievement" ? d.achievement || {} : d;
     start = build(root, data, { onDone: () => invoke("toast_done") });
   } catch {
     return done();

@@ -1,6 +1,6 @@
 [package]
 name = "bigbacklog-agent"
-version = "0.2.82"
+version = "0.2.94"
 description = "Big Backlog Agent — тосты опыта и квестов поверх игр"
 edition = "2021"
 
@@ -19,6 +19,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 webpki-roots = "0.26"
 rustls-native-certs = "0.8"
 winreg = "0.55"
+# Архивы сохранений портов Recomp (src/recomp_saves.rs); обе уже в дереве зависимостей.
+flate2 = "1"
+crc32fast = "1"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

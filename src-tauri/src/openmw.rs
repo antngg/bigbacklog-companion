@@ -126,25 +126,25 @@ pub fn present() -> bool {
 /// Что было общим с сервером на прошлом синке: содержимое (sha256) и
 /// размер/время файла здесь в тот момент — неизменный файл не перехешируем.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct Mark {
-    sha: String,
-    size: u64,
-    mtime: i64,
+pub(crate) struct Mark {
+    pub(crate) sha: String,
+    pub(crate) size: u64,
+    pub(crate) mtime: i64,
 }
 
 /// openmw.json рядом с config.json.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-struct State {
-    device_id: String,
-    marks: HashMap<String, Mark>,
+pub(crate) struct State {
+    pub(crate) device_id: String,
+    pub(crate) marks: HashMap<String, Mark>,
 }
 
 fn state_path() -> PathBuf {
     crate::config_path().with_file_name("openmw.json")
 }
 
-fn load_state(path: &Path) -> State {
+pub(crate) fn load_state(path: &Path) -> State {
     let mut st: State =
         fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     if st.device_id.is_empty() {
@@ -153,19 +153,20 @@ fn load_state(path: &Path) -> State {
     st
 }
 
-fn save_state(path: &Path, st: &State) {
+pub(crate) fn save_state(path: &Path, st: &State) {
     let tmp = path.with_extension("json.tmp");
     let ok = serde_json::to_vec_pretty(st)
         .ok()
         .is_some_and(|b| fs::write(&tmp, b).and_then(|_| fs::rename(&tmp, path)).is_ok());
     if !ok {
-        crate::log("OpenMW: не удалось записать openmw.json");
+        let file = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+        crate::log(&format!("Сохранения: не удалось записать {file}"));
     }
 }
 
 /// id этого ПК для сервера: из MachineGuid Windows (не меняется при
 /// переустановке агента), иначе из времени и номера процесса.
-fn new_device_id() -> String {
+pub(crate) fn new_device_id() -> String {
     let guid = RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
         .open_subkey(r"SOFTWARE\Microsoft\Cryptography")
         .and_then(|k| k.get_value::<String, _>("MachineGuid"))
@@ -188,30 +189,30 @@ struct LocalSave {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ServerSave {
-    id: i64,
-    name: String,
+pub(crate) struct ServerSave {
+    pub(crate) id: i64,
+    pub(crate) name: String,
     #[serde(default)]
-    sha256: String,
+    pub(crate) sha256: String,
     #[serde(default)]
-    mtime: i64,
+    pub(crate) mtime: i64,
     #[serde(default)]
-    deleted: bool,
+    pub(crate) deleted: bool,
 }
 
 #[derive(Debug, Deserialize)]
-struct Manifest {
+pub(crate) struct Manifest {
     #[serde(default)]
-    saves: Vec<ServerSave>,
+    pub(crate) saves: Vec<ServerSave>,
     #[serde(default = "default_max")]
-    max_bytes: u64,
+    pub(crate) max_bytes: u64,
 }
 
 fn default_max() -> u64 {
     16 * 1024 * 1024
 }
 
-fn mtime_of(meta: &fs::Metadata) -> i64 {
+pub(crate) fn mtime_of(meta: &fs::Metadata) -> i64 {
     meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
@@ -253,7 +254,7 @@ fn scan(root: &Path) -> HashMap<String, LocalSave> {
     out
 }
 
-fn sha_file(path: &Path) -> std::io::Result<String> {
+pub(crate) fn sha_file(path: &Path) -> std::io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
@@ -307,9 +308,9 @@ fn trash(root: &Path, ch: &str, file: &str) -> std::io::Result<bool> {
 /// Время файла для спора «кто свежее». Дате раньше 2000 года не верим: если
 /// файл менялся с прошлого синка (отметка есть), значит, уже после него —
 /// считаем «сейчас»; без отметки — самым старым.
-const SANE_MTIME: i64 = 946_684_800;
+pub(crate) const SANE_MTIME: i64 = 946_684_800;
 
-fn trusted_mtime(mtime: i64, has_mark: bool) -> i64 {
+pub(crate) fn trusted_mtime(mtime: i64, has_mark: bool) -> i64 {
     if mtime >= SANE_MTIME {
         mtime
     } else if has_mark {
@@ -330,7 +331,7 @@ enum Step {
     Remove,
 }
 
-enum NetError {
+pub(crate) enum NetError {
     /// Токен неверный, нет связи — дальше в этот раз не идём.
     Stop(String),
     /// Сервер без ручек сохранений ПК (старый) — молча.
@@ -339,7 +340,7 @@ enum NetError {
 }
 
 impl NetError {
-    fn text(&self) -> &str {
+    pub(crate) fn text(&self) -> &str {
         match self {
             NetError::Stop(m) | NetError::Other(m) => m,
             NetError::Missing => "сервер не знает сохранений ПК",
@@ -347,7 +348,7 @@ impl NetError {
     }
 }
 
-fn net_error(e: ureq::Error) -> NetError {
+pub(crate) fn net_error(e: ureq::Error) -> NetError {
     match e {
         ureq::Error::Status(code, resp) => {
             let detail = resp
@@ -365,10 +366,12 @@ fn net_error(e: ureq::Error) -> NetError {
     }
 }
 
-struct Api<'a> {
-    server: &'a str,
-    token: &'a str,
-    agent: ureq::Agent,
+/// Ручки сохранений игр на ПК; family — игра на сервере (openmw, sacred).
+pub(crate) struct Api<'a> {
+    pub(crate) server: &'a str,
+    pub(crate) token: &'a str,
+    pub(crate) family: &'a str,
+    pub(crate) agent: ureq::Agent,
 }
 
 impl Api<'_> {
@@ -379,20 +382,20 @@ impl Api<'_> {
             .set("User-Agent", crate::USER_AGENT)
     }
 
-    fn manifest(&self) -> Result<Manifest, NetError> {
-        let resp = self.get("/api/agent/handheld/saves").query("kind", KIND).query("family", FAMILY).call();
+    pub(crate) fn manifest(&self) -> Result<Manifest, NetError> {
+        let resp = self.get("/api/agent/handheld/saves").query("kind", KIND).query("family", self.family).call();
         resp.map_err(net_error)?
             .into_json::<Manifest>()
             .map_err(|e| NetError::Other(format!("ответ не разобрать: {e}")))
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn upload(&self, name: &str, mtime: i64, device_id: &str, sha: &str, current: bool, data: &[u8])
+    pub(crate) fn upload(&self, name: &str, mtime: i64, device_id: &str, sha: &str, current: bool, data: &[u8])
         -> Result<(), NetError> {
         self.agent
             .post(&format!("{}/api/agent/handheld/saves/upload", self.server))
             .query("kind", KIND)
-            .query("family", FAMILY)
+            .query("family", self.family)
             .query("name", name)
             .query("mtime", &mtime.to_string())
             .query("device_id", device_id)
@@ -409,12 +412,12 @@ impl Api<'_> {
 
     /// Файл удалили здесь. sha — версия при прошлом синке: если на сервере уже другая, он ответит 409
     /// и ничего не удалит. Ok(false) — там уже удалено.
-    fn delete(&self, name: &str, sha: &str, device_id: &str) -> Result<bool, NetError> {
+    pub(crate) fn delete(&self, name: &str, sha: &str, device_id: &str) -> Result<bool, NetError> {
         let resp = self
             .agent
             .post(&format!("{}/api/agent/handheld/saves/delete", self.server))
             .query("kind", KIND)
-            .query("family", FAMILY)
+            .query("family", self.family)
             .query("name", name)
             .query("sha256", sha)
             .query("device_id", device_id)
@@ -430,7 +433,24 @@ impl Api<'_> {
             .unwrap_or(false))
     }
 
-    fn download(&self, id: i64, max: u64) -> Result<Vec<u8>, NetError> {
+    /// Знает ли сервер эту игру: до того, как её добавили в PC_FAMILIES (app/handheld_saves.py),
+    /// он отвечает 400 «Неизвестная игра» — уже ПОСЛЕ приёма тела. Дешёвый GET истории одного
+    /// имени вместо отправки файлов в мегабайты впустую.
+    pub(crate) fn knows_family(&self, probe_name: &str) -> Result<bool, NetError> {
+        let resp = self
+            .get("/api/agent/handheld/saves/versions")
+            .query("kind", KIND)
+            .query("family", self.family)
+            .query("name", probe_name)
+            .call();
+        match resp.map_err(net_error) {
+            Ok(_) => Ok(true),
+            Err(NetError::Other(m)) if m == "Неизвестная игра" => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub(crate) fn download(&self, id: i64, max: u64) -> Result<Vec<u8>, NetError> {
         let resp = self.get(&format!("/api/agent/handheld/saves/file/{id}")).call().map_err(net_error)?;
         let mut data = Vec::new();
         resp.into_reader()
@@ -473,7 +493,7 @@ pub fn sync(server: &str, token: &str) {
         return;
     }
     let Some(root) = saves_dir() else { return };
-    let api = Api { server, token, agent: crate::tls::agent().timeout(TIMEOUT).build() };
+    let api = Api { server, token, family: FAMILY, agent: crate::tls::agent().timeout(TIMEOUT).build() };
     let manifest = match api.manifest() {
         Ok(m) => m,
         Err(NetError::Missing) => return,

@@ -244,8 +244,10 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bigbacklog-agent"
-version = "0.2.82"
+version = "0.2.94"
 dependencies = [
+ "crc32fast",
+ "flate2",
  "rustls",
  "rustls-native-certs",
  "serde",

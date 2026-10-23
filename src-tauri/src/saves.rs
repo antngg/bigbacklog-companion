@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use serde_json::{json, Value};
 
 /// id игры (как на сервере) и её название в окне.
-pub const GAMES: [(&str, &str); 8] = [
+pub const GAMES: [(&str, &str); 9] = [
     ("w3", "The Witcher 3"),
     ("d2r", "Diablo II: Resurrected"),
     ("sacred", "Sacred Gold"),
@@ -28,6 +28,7 @@ pub const GAMES: [(&str, &str); 8] = [
     ("ror2", "Risk of Rain 2"),
     ("cp77", "Cyberpunk 2077"),
     ("omw", "OpenMW (Morrowind)"),
+    ("mw2", "Modern Warfare 2 (IW4x)"),
 ];
 
 /// id встроенных игр: их описания с сервера агент не берет.
@@ -37,7 +38,9 @@ pub fn builtin_ids() -> Vec<&'static str> {
 
 /// Все игры окна: встроенные и из описаний сервера.
 pub fn games() -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = GAMES.iter().map(|(id, n)| (id.to_string(), n.to_string())).collect();
+    // MW2 — только обмен прокачкой между устройствами, а он только в dev-сборке владельца.
+    let mut out: Vec<(String, String)> = GAMES.iter().filter(|(id, _)| crate::DEV || *id != "mw2")
+        .map(|(id, n)| (id.to_string(), n.to_string())).collect();
     out.extend(crate::specs::all().into_iter().map(|s| (s.id, s.name)));
     out
 }
@@ -55,6 +58,7 @@ static NOW_S2: AtomicBool = AtomicBool::new(false);
 static NOW_ROR2: AtomicBool = AtomicBool::new(false);
 static NOW_CP77: AtomicBool = AtomicBool::new(false);
 static NOW_OMW: AtomicBool = AtomicBool::new(false);
+static NOW_MW2: AtomicBool = AtomicBool::new(false);
 /// То же для игр из описаний сервера.
 static NOW_SPEC: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
@@ -68,6 +72,7 @@ fn now_flag(id: &str) -> Option<&'static AtomicBool> {
         "ror2" => Some(&NOW_ROR2),
         "cp77" => Some(&NOW_CP77),
         "omw" => Some(&NOW_OMW),
+        "mw2" => Some(&NOW_MW2),
         _ => None,
     }
 }
@@ -158,6 +163,7 @@ pub fn default_dir(id: &str) -> Option<PathBuf> {
         "ror2" => crate::ror2::saves_dir(),
         "cp77" => crate::cp77::saves_dir(),
         "omw" => crate::openmw::default_saves_dir(),
+        "mw2" => crate::mw2::default_dir(),
         _ => crate::specs::get(id).and_then(|s| crate::specs::default_roots(&s).into_iter().next()),
     }
 }
@@ -202,6 +208,7 @@ fn sent_files(config_dir: &std::path::Path, id: &str) -> Vec<(String, u64, &'sta
         "ror2" => "ror2.json",
         "cp77" => "cp77.json",
         "d2r" => "d2r.json",
+        "mw2" => "mw2.json",
         _ if crate::specs::get(id).is_some() => spec_file.as_str(),
         _ => return out,
     };
@@ -249,6 +256,7 @@ fn steam_appids(id: &str) -> Vec<String> {
         "ror2" => &[crate::ror2::STEAM_APPID],
         "cp77" => &[crate::cp77::STEAM_APPID],
         "omw" => &[crate::openmw::STEAM_APPID],
+        "mw2" => &[crate::mw2::STEAM_APPID, crate::mw2::STEAM_APPID_MP],
         _ => return crate::specs::get(id).map(|s| s.steam_appids).unwrap_or_default(),
     };
     fixed.iter().map(|s| s.to_string()).collect()

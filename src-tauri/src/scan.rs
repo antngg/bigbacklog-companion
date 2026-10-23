@@ -11,6 +11,9 @@
 //! самая длинная совпавшая папка) и это не лаунчер/редактор/служба. Эмуляторы
 //! узнаются по имени exe, а какая в них игра — по заголовку окна (разбирает
 //! сервер). Проверяются они РАНЬШЕ каталога: RetroArch бывает Steam-приложением.
+//! Порты Recomp (Ship of Harkinian, Zelda64Recompiled…) узнаются по имени exe из
+//! списка сервера (`recomp_exes` в /api/agent/state) и ПОСЛЕ каталога: порт,
+//! положенный в папку Steam-игры, остается Steam-игрой.
 //!
 //! Доступ к чужим процессам — только PROCESS_QUERY_LIMITED_INFORMATION (путь к
 //! exe): ни памяти, ни командной строки игр агент не читает — безопасно для
@@ -18,18 +21,25 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use serde::Serialize;
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 use winreg::RegKey;
 
-#[derive(Clone, Serialize, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Serialize, Debug, PartialEq, Eq, Hash, Default)]
 pub struct GameInfo {
-    /// steam | gog | battlenet | emu
+    /// steam | gog | battlenet | emu | recomp
     pub source: String,
-    /// appid / GOG gameID / ключ записи Blizzard / платформа эмулятора (ps2, psp, …)
+    /// appid / GOG gameID / ключ записи Blizzard / платформа эмулятора (ps2, psp, …) / exe порта Recomp
     pub id: String,
     pub name: String,
+    /// Только Recomp: какие порты каталога подошли по признаку папки (слаги) и
+    /// короткий хэш папки exe, к которой сервер привязывает выбор человека.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ports: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
 struct Root {
@@ -68,8 +78,113 @@ const EMULATORS: &[(&str, &str, &str)] = &[
     ("dolphin", "gc", "Dolphin"),
     ("ryujinx", "switch", "Ryujinx"),
     ("cemu", "wiiu", "Cemu"),
+    ("project64", "n64", "Project64"),
+    ("simple64-gui", "n64", "simple64"),
+    ("simple64", "n64", "simple64"),
     ("retroarch", "retroarch", "RetroArch"),
 ];
+
+/// Порт Recomp из списка сервера (app/recomp.py::agent_exes).
+#[derive(Clone)]
+struct RecompPort {
+    slug: String,
+    /// Название для «Сейчас»: игра, а у общего exe имя первого порта.
+    name: String,
+    game: String,
+    /// Признак папки: файл рядом с exe (в его папке или трех выше) или
+    /// «path:слово» в пути к exe. Пусто — порт узнается по одному имени.
+    marker: Vec<String>,
+}
+
+/// Порты Recomp: имя exe (нижний регистр, без .exe) → порты с этим exe. Их
+/// бывает несколько (ps2EntryRunner.exe, общий раннер автора), тогда решает
+/// признак папки, а что не решил он, решает сервер (app/recomp_pick.py).
+/// Список приходит с сервера, так что новый порт в каталоге сайта агент узнает
+/// без новой сборки; до первого ответа сервера список пуст.
+static RECOMP: Mutex<Option<HashMap<String, Vec<RecompPort>>>> = Mutex::new(None);
+/// Что признаки сказали про папку exe (путь → (название, подошедшие слаги)):
+/// файлы рядом с игрой не проверяются заново каждые 5 секунд.
+static RECOMP_HITS: Mutex<Option<HashMap<String, (String, Vec<String>)>>> = Mutex::new(None);
+
+pub fn set_recomp_from_state(state: &serde_json::Value) {
+    let Some(arr) = state.get("recomp_exes").and_then(|v| v.as_array()) else { return };
+    let mut map: HashMap<String, Vec<RecompPort>> = HashMap::new();
+    for v in arr {
+        let Some(exe) = v.get("exe").and_then(|x| x.as_str()).map(str::to_lowercase) else { continue };
+        if exe.is_empty() {
+            continue;
+        }
+        let name = v.get("name").and_then(|x| x.as_str()).unwrap_or(&exe).to_string();
+        let text = |key: &str| v.get(key).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        let marker = v
+            .get("marker")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|m| m.as_str().map(str::to_string)).filter(|m| !m.is_empty()).collect())
+            .unwrap_or_default();
+        let game = Some(text("game")).filter(|g| !g.is_empty()).unwrap_or_else(|| name.clone());
+        map.entry(exe).or_default().push(RecompPort { slug: text("slug"), name, game, marker });
+    }
+    *RECOMP.lock().unwrap() = Some(map);
+    *RECOMP_HITS.lock().unwrap() = None;
+}
+
+/// Признак порта в папке exe: «path:слово» в пути или файл рядом (в папке exe и трех выше:
+/// раннер бывает собран в build\...\Release).
+fn marker_hit(marker: &str, path: &str) -> bool {
+    if let Some(word) = marker.strip_prefix("path:") {
+        // Только буквы и цифры с обеих сторон: «God of War» и «god-of-war» оба — godofwar.
+        let squash = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
+        let word = squash(word);
+        return !word.is_empty() && squash(path).contains(&word);
+    }
+    let rel = marker.replace('/', "\\");
+    let Some(dir) = std::path::Path::new(path).parent() else { return false };
+    dir.ancestors().take(4).any(|d| d.join(&rel).exists())
+}
+
+/// Какой это порт Recomp: название для «Сейчас» и слаги, которые подошли по
+/// признаку папки (None — путь к exe не прочитался, решает сервер по имени).
+/// Подошел чей-то признак — только эти порты; не подошел ничей — порты без
+/// признака (у них хватает имени). Пусто — сервер спросит человека.
+fn recomp_match(stem: &str, path: Option<&str>) -> Option<(String, Option<Vec<String>>)> {
+    let ports = RECOMP.lock().unwrap().as_ref()?.get(stem).cloned()?;
+    let first = ports.first()?.name.clone();
+    let Some(path) = path else { return Some((first, None)) };
+    if let Some((name, slugs)) = RECOMP_HITS.lock().unwrap().as_ref().and_then(|m| m.get(path).cloned()) {
+        return Some((name, Some(slugs)));
+    }
+    let hit: Vec<&RecompPort> =
+        ports.iter().filter(|p| p.marker.iter().any(|m| marker_hit(m, path))).collect();
+    let picked: Vec<&RecompPort> =
+        if hit.is_empty() { ports.iter().filter(|p| p.marker.is_empty()).collect() } else { hit };
+    let name = match picked.as_slice() {
+        [one] if ports.len() > 1 => one.game.clone(),
+        _ => first,
+    };
+    let slugs: Vec<String> = picked.iter().map(|p| p.slug.clone()).filter(|s| !s.is_empty()).collect();
+    RECOMP_HITS.lock().unwrap().get_or_insert_with(HashMap::new).insert(path.to_string(), (name.clone(), slugs.clone()));
+    Some((name, Some(slugs)))
+}
+
+/// Короткий хэш папки exe (FNV-1a): сервер привязывает к нему выбор порта, а
+/// сам путь (с именем пользователя Windows) не уходит с компьютера.
+fn dir_hash(path: &str) -> String {
+    let dir = path.rsplit_once('\\').map(|(d, _)| d).unwrap_or(path);
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in dir.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Где лежит exe порта Recomp, который запускался в этом сеансе приложения (exe → полный путь,
+/// нижний регистр): от него recomp_ach.rs ищет папку достижений порта.
+static RECOMP_PATHS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+pub fn recomp_path(exe: &str) -> Option<String> {
+    RECOMP_PATHS.lock().unwrap().as_ref()?.get(exe).cloned()
+}
 
 /// Не игры, хоть и лежат в папке игры.
 fn is_helper(exe_lower: &str) -> bool {
@@ -172,6 +287,7 @@ fn steam(roots: &mut Vec<Root>) {
                     source: "steam".into(),
                     id: appid.clone(),
                     name: pairs.get("name").cloned().unwrap_or_default(),
+                    ..Default::default()
                 },
             });
         }
@@ -188,7 +304,7 @@ fn gog(roots: &mut Vec<Root>, installed: &mut Vec<GameInfo>) {
         let id: String = k.get_value("gameID").unwrap_or(sub.clone());
         let name: String = k.get_value("gameName").unwrap_or_default();
         let Ok(path) = k.get_value::<String, _>("path") else { continue };
-        let info = GameInfo { source: "gog".into(), id, name };
+        let info = GameInfo { source: "gog".into(), id, name, ..Default::default() };
         installed.push(info.clone());
         roots.push(Root { dir: norm_dir(&path), info });
     }
@@ -221,7 +337,7 @@ fn battlenet(roots: &mut Vec<Root>, installed: &mut Vec<GameInfo>) {
             if !seen.insert(sub.clone()) {
                 continue;
             }
-            let info = GameInfo { source: "battlenet".into(), id: sub.clone(), name };
+            let info = GameInfo { source: "battlenet".into(), id: sub.clone(), name, ..Default::default() };
             installed.push(info.clone());
             // Папка exe из DisplayIcon точнее папки установки: у WoW retail и
             // трёх Classic папка установки общая, а exe — в _retail_/_classic_.
@@ -368,7 +484,12 @@ impl Scanner {
             let title = titles.and_then(|t| t.first().cloned()).filter(|t| !t.is_empty());
 
             if let Some((_, platform, emu)) = EMULATORS.iter().find(|(name, _, _)| *name == stem) {
-                let info = GameInfo { source: "emu".into(), id: (*platform).into(), name: (*emu).into() };
+                let info = GameInfo {
+                    source: "emu".into(),
+                    id: (*platform).into(),
+                    name: (*emu).into(),
+                    ..Default::default()
+                };
                 merge(&mut found, info, title, has_window);
                 continue;
             }
@@ -381,9 +502,15 @@ impl Scanner {
             if entry.0 != exe_lower {
                 *entry = (exe_lower.clone(), sys::image_path(pid).map(|p| p.to_lowercase()));
             }
-            let Some(path) = entry.1.as_deref() else { continue };
-            if let Some(info) = cat.by_path(path) {
+            if let Some(info) = entry.1.as_deref().and_then(|path| cat.by_path(path)) {
                 merge(&mut found, info.clone(), title, has_window);
+            } else if let Some((name, ports)) = recomp_match(stem, entry.1.as_deref()) {
+                if let Some(path) = entry.1.clone() {
+                    RECOMP_PATHS.lock().unwrap().get_or_insert_with(HashMap::new).insert(stem.to_string(), path);
+                }
+                let dir = entry.1.as_deref().map(dir_hash);
+                let info = GameInfo { source: "recomp".into(), id: stem.to_string(), name, ports, dir };
+                merge(&mut found, info, title, has_window);
             }
         }
         found.into_values().collect()
@@ -402,3 +529,48 @@ fn merge(found: &mut HashMap<GameInfo, Running>, info: GameInfo, title: Option<S
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(rows: serde_json::Value) {
+        set_recomp_from_state(&serde_json::json!({ "recomp_exes": rows }));
+    }
+
+    #[test]
+    fn recomp_marker_picks_port() {
+        let root = std::env::temp_dir().join(format!("bb-recomp-{}", std::process::id()));
+        let bb = root.join("bloodborne");
+        let sotc = root.join("sotc").join("build").join("release");
+        std::fs::create_dir_all(&bb).unwrap();
+        std::fs::create_dir_all(&sotc).unwrap();
+        std::fs::write(bb.join("Bloodborne.exe"), b"").unwrap();
+        std::fs::write(root.join("sotc").join("SotC.exe"), b"").unwrap();
+        state(serde_json::json!([
+            {"exe": "bb-probe", "name": "Bloodborne", "slug": "bloodborne", "game": "Bloodborne", "marker": ["Bloodborne.exe"]},
+            {"exe": "bb-probe", "name": "Bloodborne", "slug": "sotc", "game": "Shadow of the Colossus", "marker": ["SotC.exe"]},
+            {"exe": "runner", "name": "DOAXBV", "slug": "doaxbv", "game": "DOAXBV", "marker": ["path:doax"]},
+            {"exe": "solo", "name": "Solo"}
+        ]));
+        let p = |d: &std::path::Path, exe: &str| d.join(exe).to_string_lossy().to_lowercase();
+        let (name, ports) = recomp_match("bb-probe", Some(&p(&bb, "bb-probe.exe"))).unwrap();
+        assert_eq!((name.as_str(), ports), ("Bloodborne", Some(vec!["bloodborne".to_string()])));
+        // Признак в папке выше exe: раннер собран в build\release.
+        let (name, ports) = recomp_match("bb-probe", Some(&p(&sotc, "bb-probe.exe"))).unwrap();
+        assert_eq!((name.as_str(), ports), ("Shadow of the Colossus", Some(vec!["sotc".to_string()])));
+        // Ничей признак не подошел: пусто, сервер спросит человека.
+        let (_, ports) = recomp_match("bb-probe", Some(&p(&root, "bb-probe.exe"))).unwrap();
+        assert_eq!(ports, Some(vec![]));
+        assert_eq!(recomp_match("runner", Some(r"c:\games\doaxbv-0.5.3\runner.exe")).unwrap().1,
+                   Some(vec!["doaxbv".to_string()]));
+        assert_eq!(recomp_match("runner", Some(r"c:\games\doa3\runner.exe")).unwrap().1, Some(vec![]));
+        assert!(marker_hit("path:godofwar", r"d:\god of war - recomp\ps2entryrunner.exe"));
+        // Без признака и без пути: по одному имени, как раньше.
+        assert_eq!(recomp_match("solo", None).unwrap(), ("Solo".to_string(), None));
+        assert!(recomp_match("other", None).is_none());
+        assert_eq!(dir_hash(r"c:\a\x.exe"), dir_hash(r"c:\a\y.exe"));
+        assert_ne!(dir_hash(r"c:\a\x.exe"), dir_hash(r"c:\b\x.exe"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+}

@@ -436,7 +436,7 @@ fn poll_once(addr: &str, state: &mut State, upload: Option<&dyn Fn(&Value) -> Op
     }
     conn.bye();
     Ok(Some(Running {
-        info: GameInfo { source: SOURCE.into(), id: title_id.unwrap_or_default(), name },
+        info: GameInfo { source: SOURCE.into(), id: title_id.unwrap_or_default(), name, ..Default::default() },
         title: None,
         has_window: true,
     }))
