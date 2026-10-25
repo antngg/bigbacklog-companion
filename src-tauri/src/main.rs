@@ -150,6 +150,10 @@ struct Config {
     /// Свои папки сохранений игр (окно «Сохранения игр»): id игры → путь.
     #[serde(default)]
     save_dirs: std::collections::HashMap<String, String>,
+    /// Свои папки с играми (окно «Папки с играми»): игры вне
+    /// магазинов, каждая подпапка — игра (см. scan::folder_match).
+    #[serde(default)]
+    game_dirs: Vec<String>,
 }
 
 /// Портативный режим: config.json рядом с exe — токен (и копия вида плашек)
@@ -170,6 +174,7 @@ fn load_config() -> Config {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
     saves::set_dirs(&cfg.save_dirs);
+    scan::set_game_dirs(&cfg.game_dirs);
     cfg
 }
 
@@ -1003,6 +1008,41 @@ mod win {
         }
     }
 
+    /// Выбор папки окном Windows (SHBrowseForFolder) — без плагина диалогов и его
+    /// зависимостей: приложение живет в трее весь день, лишний код ему ни к чему.
+    /// Свой поток: окну нужен COM в однопоточном апартаменте.
+    pub fn pick_folder(owner: isize, title: &str) -> Option<String> {
+        use windows_sys::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED};
+        use windows_sys::Win32::UI::Shell::{
+            SHBrowseForFolderW, SHGetPathFromIDListW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
+        };
+        let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        std::thread::spawn(move || unsafe {
+            CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as _);
+            let mut name = [0u16; 260];
+            let mut info: BROWSEINFOW = std::mem::zeroed();
+            info.hwndOwner = owner as _;
+            info.pszDisplayName = name.as_mut_ptr();
+            info.lpszTitle = title.as_ptr();
+            info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+            let pidl = SHBrowseForFolderW(&info);
+            let mut out = None;
+            if !pidl.is_null() {
+                let mut buf = [0u16; 1024];
+                if SHGetPathFromIDListW(pidl, buf.as_mut_ptr()) != 0 {
+                    let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
+                    out = Some(String::from_utf16_lossy(&buf[..len])).filter(|p| !p.is_empty());
+                }
+                CoTaskMemFree(pidl as _);
+            }
+            CoUninitialize();
+            out
+        })
+        .join()
+        .ok()
+        .flatten()
+    }
+
     pub fn open_url(url: &str) {
         let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
         let (verb, target) = (wide("open"), wide(url));
@@ -1395,6 +1435,107 @@ fn open_saves(app: &AppHandle) {
         .additional_browser_args(WEBVIEW_ARGS)
         .inner_size(600.0, 560.0)
         .min_inner_size(480.0, 420.0)
+        .center()
+        .build();
+}
+
+// ---------- Папки с играми ----------
+
+/// Свои папки и какие игры в них узнаются: подпапки первого уровня, а если exe
+/// лежит прямо в папке, то она сама одна игра.
+#[tauri::command]
+fn get_game_dirs(state: tauri::State<'_, Arc<Shared>>) -> Value {
+    let dirs = state.cfg.lock().unwrap().game_dirs.clone();
+    let rows: Vec<Value> = dirs.iter().map(|d| {
+        let found = std::path::Path::new(d).is_dir();
+        let (single, subs) = scan::folder_games(d);
+        let games: Vec<Value> = if single {
+            let folder = std::path::Path::new(d).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            vec![json!({"folder": folder, "name": scan::clean_name(&folder)})]
+        } else {
+            subs.iter().map(|f| json!({"folder": f, "name": scan::clean_name(f)})).collect()
+        };
+        json!({"path": d, "found": found, "single": single, "games": games})
+    }).collect();
+    json!({"dirs": rows})
+}
+
+fn change_game_dirs(state: &Shared, edit: impl FnOnce(&mut Vec<String>)) -> Result<(), String> {
+    let mut cfg = state.cfg.lock().unwrap().clone();
+    edit(&mut cfg.game_dirs);
+    write_config(&cfg).map_err(|e| format!("не сохранить конфиг: {e}"))?;
+    scan::set_game_dirs(&cfg.game_dirs);
+    *state.cfg.lock().unwrap() = cfg;
+    Ok(())
+}
+
+fn add_dir(path: &str, state: &Shared) -> Result<(), String> {
+    let path = path.trim().trim_matches('"').trim_end_matches(['\\', '/']).to_string();
+    if path.is_empty() {
+        return Ok(());
+    }
+    if !std::path::Path::new(&path).is_dir() {
+        return Err("такой папки нет".into());
+    }
+    if let Some(why) = scan::forbidden_dir(&path) {
+        return Err(why.into());
+    }
+    let key = path.to_lowercase();
+    change_game_dirs(state, |dirs| {
+        if !dirs.iter().any(|d| d.to_lowercase() == key) {
+            dirs.push(path.clone());
+        }
+    })?;
+    log(&format!("Папки с играми: добавлена {path}"));
+    Ok(())
+}
+
+#[tauri::command]
+fn add_game_dir(path: String, state: tauri::State<'_, Arc<Shared>>) -> Result<Value, String> {
+    add_dir(&path, &state)?;
+    Ok(get_game_dirs(state))
+}
+
+/// Выбор папки окном Windows; отмена — список как был.
+#[tauri::command(async)]
+fn pick_game_dir(window: WebviewWindow, state: tauri::State<'_, Arc<Shared>>) -> Result<Value, String> {
+    let owner = window.hwnd().map(|h| h.0 as isize).unwrap_or(0);
+    if let Some(path) = win::pick_folder(owner, "Папка с играми") {
+        add_dir(&path, &state)?;
+    }
+    Ok(get_game_dirs(state))
+}
+
+#[tauri::command]
+fn remove_game_dir(path: String, state: tauri::State<'_, Arc<Shared>>) -> Result<Value, String> {
+    change_game_dirs(&state, |dirs| dirs.retain(|d| *d != path))?;
+    log(&format!("Папки с играми: убрана {path}"));
+    Ok(get_game_dirs(state))
+}
+
+#[tauri::command]
+fn open_game_dir(path: String) {
+    win::open_url(&path);
+}
+
+#[tauri::command]
+fn close_game_dirs(window: WebviewWindow) {
+    std::thread::spawn(move || {
+        let _ = window.destroy();
+    });
+}
+
+fn open_game_dirs_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("games") {
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return;
+    }
+    let _ = WebviewWindowBuilder::new(app, "games", WebviewUrl::App("games.html".into()))
+        .title("BigBacklog Companion — папки с играми")
+        .additional_browser_args(WEBVIEW_ARGS)
+        .inner_size(600.0, 520.0)
+        .min_inner_size(480.0, 380.0)
         .center()
         .build();
 }
@@ -2737,7 +2878,9 @@ fn report(s: &Shared, server: &str, token: &str) {
                 "sid": v.sid, "source": v.info.source, "id": v.info.id, "name": v.info.name,
                 // Заголовок окна нужен только эмуляторам (какая в них игра), Xbox 360 (имя с приставки)
                 // и Recomp (gk.exe OpenGOAL один на три Jak).
-                "title": if matches!(v.info.source.as_str(), "emu" | "recomp") || v.info.source == xbox360::SOURCE {
+                "title": if matches!(v.info.source.as_str(), "emu" | "recomp" | scan::FOLDER_SOURCE | scan::SHORTCUT_SOURCE)
+                    || v.info.source == xbox360::SOURCE
+                {
                     v.title.clone()
                 } else {
                     None
@@ -2866,6 +3009,7 @@ fn build_tray(app: &AppHandle, s: &Arc<Shared>) -> tauri::Result<()> {
     let open_overlay = MenuItem::with_id(app, "open_overlay", "Открыть оверлей", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Подключение…", true, None::<&str>)?;
     let saves_item = MenuItem::with_id(app, "saves", "Сохранения игр для вкладки «Прогресс»…", true, None::<&str>)?;
+    let games_item = MenuItem::with_id(app, "games", "Папки с играми…", true, None::<&str>)?;
     let check_update = MenuItem::with_id(app, "check_update", "Проверить обновления", true, None::<&str>)?;
     let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
     let autostart = CheckMenuItem::with_id(app, "autostart", "Запускать вместе с Windows", true, autostart_on, None::<&str>)?;
@@ -2896,7 +3040,8 @@ fn build_tray(app: &AppHandle, s: &Arc<Shared>) -> tauri::Result<()> {
         items.push(&open_overlay);
         items.push(&schema_menu);
     }
-    items.extend([&settings as &dyn tauri::menu::IsMenuItem<tauri::Wry>, &saves_item, &autostart, &check_update, &sep3, &quit]);
+    items.extend([&settings as &dyn tauri::menu::IsMenuItem<tauri::Wry>, &saves_item, &games_item]);
+    items.extend([&autostart as &dyn tauri::menu::IsMenuItem<tauri::Wry>, &check_update, &sep3, &quit]);
     let menu = Menu::with_items(app, &items)?;
     *s.connect_item.lock().unwrap() = Some((menu.clone(), settings.clone(), true));
     *s.status_item.lock().unwrap() = Some(status);
@@ -2952,6 +3097,10 @@ fn build_tray(app: &AppHandle, s: &Arc<Shared>) -> tauri::Result<()> {
                     let app = app.clone();
                     std::thread::spawn(move || open_saves(&app));
                 }
+                "games" => {
+                    let app = app.clone();
+                    std::thread::spawn(move || open_game_dirs_window(&app));
+                }
                 "autostart" => {
                     let launcher = app.autolaunch();
                     let on = launcher.is_enabled().unwrap_or(false);
@@ -3002,6 +3151,10 @@ fn scan_report() {
     let mut out = std::io::stdout().lock();
     let catalog = scan::Catalog::load();
     let _ = writeln!(out, "каталог: {} папок игр", catalog.roots_count());
+    let cfg = load_config();
+    for d in &cfg.game_dirs {
+        let _ = writeln!(out, "  своя папка   {d}");
+    }
     for g in &catalog.installed {
         let _ = writeln!(out, "  установлено  {:<9} {:<28} {}", g.source, g.id, g.name);
     }
@@ -3065,7 +3218,8 @@ fn main() {
         .manage(shared)
         .invoke_handler(tauri::generate_handler![
             toast_data, toast_assets, toast_show, toast_done, get_config, save_config, close_settings, pair_start, pair_poll,
-            get_saves, set_save_sync, send_save_now, set_save_dir, open_save_dir, close_saves
+            get_saves, set_save_sync, send_save_now, set_save_dir, open_save_dir, close_saves,
+            get_game_dirs, add_game_dir, pick_game_dir, remove_game_dir, open_game_dir, close_game_dirs
         ])
         .setup(move |app| {
             let s = setup_shared;

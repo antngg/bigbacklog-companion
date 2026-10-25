@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>BigBacklog Companion — папки с играми</title>
+<style>
+  @font-face { font-family: "Ubuntu"; font-weight: 400; src: url("fonts/ubuntu-latin-400.woff2") format("woff2"); unicode-range: U+0000-00FF, U+2000-206F; }
+  @font-face { font-family: "Ubuntu"; font-weight: 400; src: url("fonts/ubuntu-cyrillic-400.woff2") format("woff2"); unicode-range: U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
+  @font-face { font-family: "Ubuntu"; font-weight: 700; src: url("fonts/ubuntu-latin-700.woff2") format("woff2"); unicode-range: U+0000-00FF, U+2000-206F; }
+  @font-face { font-family: "Ubuntu"; font-weight: 700; src: url("fonts/ubuntu-cyrillic-700.woff2") format("woff2"); unicode-range: U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
+  html, body { margin: 0; background: #0e1218; color: #e8edf2; font: 14px/1.4 "Ubuntu", "Segoe UI", sans-serif; }
+  body { padding: 18px 20px 20px; }
+  .top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  h1 { margin: 0; font-size: 17px; }
+  .count { color: #93a1ae; font-size: 12.5px; white-space: nowrap; }
+  p.hint { margin: 4px 0 12px; color: #93a1ae; font-size: 12px; }
+  .bar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .bar input { flex: 1; min-width: 160px; }
+
+  .list { border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 9px; overflow: hidden; background: rgba(255, 255, 255, 0.02); }
+  .dir + .dir { border-top: 1px solid rgba(255, 255, 255, 0.07); }
+  .row { display: flex; align-items: center; gap: 10px; padding: 6px 12px; min-height: 32px; cursor: pointer; }
+  .row:hover { background: rgba(255, 255, 255, 0.04); }
+  .ic { width: 28px; height: 28px; border-radius: 6px; flex: none; background: #1b2430; display: grid;
+    place-items: center; font-weight: 700; color: #93a1ae; font-size: 14px; }
+  .who { flex: 1; min-width: 0; }
+  .name { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .st { font-size: 12px; color: #93a1ae; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .st.warn { color: #ffb38a; }
+  .chev { color: #5d6b78; width: 12px; text-align: center; transition: transform .12s; }
+  .dir.open .chev { transform: rotate(90deg); }
+  .more { display: none; padding: 0 12px 12px 50px; }
+  .dir.open .more { display: block; }
+  .dir.open { background: rgba(255, 255, 255, 0.025); }
+  .line { margin-top: 4px; font-size: 12.5px; color: #93a1ae; word-break: break-all; }
+  .line b { color: #c9d3dc; font-weight: 400; }
+  .games { margin-top: 6px; max-height: 220px; overflow-y: auto; border-left: 2px solid rgba(255, 255, 255, 0.08); padding-left: 10px; }
+  .g { font-size: 12.5px; color: #c9d3dc; padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .g span { color: #7d8a96; }
+  .acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  button { padding: 5px 10px; border-radius: 7px; border: 1px solid rgba(255, 255, 255, 0.14); cursor: pointer;
+    background: rgba(255, 255, 255, 0.05); color: #e8edf2; font: 12px "Ubuntu", sans-serif; white-space: nowrap; }
+  button:hover { border-color: #3fd8c7; }
+  button.main { background: rgba(63, 216, 199, 0.16); border-color: #3fd8c7; color: #bff5ee; }
+  input { box-sizing: border-box; padding: 6px 9px; border-radius: 7px; border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.05); color: inherit; font: 12.5px "Ubuntu", sans-serif; outline: none; }
+  input:focus { border-color: #3fd8c7; }
+  .empty { padding: 16px 12px; color: #93a1ae; font-size: 12.5px; }
+  .foot { padding: 10px 12px 12px; color: #7d8a96; font-size: 11.5px; border-top: 1px solid rgba(255, 255, 255, 0.07); }
+  #status { min-height: 18px; font-size: 12.5px; color: #93a1ae; margin-top: 8px; }
+  #status.error { color: #ff8a8a; }
+</style>
+</head>
+<body>
+  <div class="top"><h1>Папки с играми</h1><span class="count" id="count"></span></div>
+  <p class="hint">Для игр не из магазинов, например копий с GOG без Galaxy или старых игр. Приложение замечает, когда запущена игра из этих папок, и считает время. Каждая подпапка становится отдельной игрой и появляется на сайте на полке GOG после первого запуска. Список папок остается на компьютере, на сайт уходит только название игры.</p>
+  <div class="bar">
+    <button class="main" id="pick">Выбрать папку</button>
+    <input id="path" placeholder="или вставьте путь, например D:\Games" spellcheck="false" autocomplete="off">
+    <button id="add">Добавить</button>
+  </div>
+  <div class="list" id="list"></div>
+  <div id="status"></div>
+<script>
+  const { invoke } = window.__TAURI__.core;
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const plural = (n, one, few, many) => `${n} ${n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many}`;
+  const games = (n) => plural(n, "игра", "игры", "игр");
+  const open = new Set();
+  let last = null;
+
+  function status(d) {
+    if (!d.found) return ["warn", "Папка недоступна"];
+    if (d.single) return ["", "Одна игра"];
+    return ["", d.games.length ? games(d.games.length) : "Пока пустая"];
+  }
+
+  function dirHtml(d) {
+    const [cls, text] = status(d);
+    const base = d.path.split(/[\\/]/).filter(Boolean).pop() || d.path;
+    return `<div class="dir ${open.has(d.path) ? "open" : ""}" data-path="${esc(d.path)}">
+      <div class="row" data-act="expand">
+        <span class="ic">${esc(base.slice(0, 1).toUpperCase())}</span>
+        <div class="who"><div class="name">${esc(base)}</div><div class="st ${cls}">${esc(text)}</div></div>
+        <span class="chev">›</span>
+      </div>
+      <div class="more">
+        <div class="line">Папка <b>${esc(d.path)}</b></div>
+        ${d.single ? `<div class="line">exe лежит прямо в папке, поэтому вся она одна игра</div>` : ""}
+        ${d.games.length ? `<div class="games">${d.games.map((g) => `<div class="g">${esc(g.name)}${g.name !== g.folder ? ` <span>из папки ${esc(g.folder)}</span>` : ""}</div>`).join("")}</div>` : ""}
+        <div class="acts">
+          <button data-act="open" ${d.found ? "" : "disabled"}>Открыть папку</button>
+          <button data-act="remove">Убрать из списка</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function render(data) {
+    last = data;
+    const total = data.dirs.reduce((n, d) => n + d.games.length, 0);
+    $("count").textContent = data.dirs.length ? `${plural(data.dirs.length, "папка", "папки", "папок")}, ${games(total)}` : "";
+    $("list").innerHTML = (data.dirs.length ? data.dirs.map(dirHtml).join("")
+      : `<div class="empty">Папок пока нет. Добавьте папку, где лежат игры, например D:\\Games</div>`)
+      + `<div class="foot">Игры из Steam, GOG Galaxy и Battle.net в этих папках по-прежнему считаются по своему магазину. Если в папке лежит подборка, например D:\\Games\\DOS, добавьте ее отдельно, тогда играми станут ее подпапки</div>`;
+  }
+
+  async function run(fn) {
+    $("status").className = "";
+    $("status").textContent = "";
+    try { render(await fn()); }
+    catch (err) { $("status").textContent = "Не вышло, " + err; $("status").className = "error"; }
+  }
+
+  $("pick").addEventListener("click", () => run(() => invoke("pick_game_dir")));
+  const addTyped = () => run(async () => {
+    const res = await invoke("add_game_dir", { path: $("path").value });
+    $("path").value = "";
+    return res;
+  });
+  $("add").addEventListener("click", addTyped);
+  $("path").addEventListener("keydown", (e) => { if (e.key === "Enter") addTyped(); });
+
+  $("list").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-act]");
+    if (!b) return;
+    const path = b.closest(".dir").dataset.path;
+    const act = b.dataset.act;
+    if (act === "expand") { open.has(path) ? open.delete(path) : open.add(path); render(last); }
+    else if (act === "open") invoke("open_game_dir", { path });
+    else if (act === "remove") { open.delete(path); run(() => invoke("remove_game_dir", { path })); }
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("path").value) invoke("close_game_dirs"); });
+  run(() => invoke("get_game_dirs"));
+</script>
+</body>
+</html>

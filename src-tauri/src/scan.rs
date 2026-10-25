@@ -15,6 +15,15 @@
 //! списка сервера (`recomp_exes` в /api/agent/state) и ПОСЛЕ каталога: порт,
 //! положенный в папку Steam-игры, остается Steam-игрой.
 //!
+//! Сторонние игры, которые человек добавил в Steam (`userdata\<id>\config\shortcuts.vdf`),
+//! — тоже каталог: папка exe → игра под ее именем в Steam. На сайте
+//! это строка полки Steam со значком ярлыка.
+//!
+//! Свои папки с играми (окно «Папки с играми») проверяются
+//! последними: DRM-free копии с GOG без Galaxy, abandonware, всё вне магазинов.
+//! Игра — подпапка первого уровня (exe на любой глубине внутри нее), а если exe
+//! лежит прямо в добавленной папке, то сама папка. На сайт уходит только имя.
+//!
 //! Доступ к чужим процессам — только PROCESS_QUERY_LIMITED_INFORMATION (путь к
 //! exe): ни памяти, ни командной строки игр агент не читает — безопасно для
 //! античитов.
@@ -29,9 +38,10 @@ use winreg::RegKey;
 
 #[derive(Clone, Serialize, Debug, PartialEq, Eq, Hash, Default)]
 pub struct GameInfo {
-    /// steam | gog | battlenet | emu | recomp
+    /// steam | gog | battlenet | emu | recomp | folder | steamshortcut
     pub source: String,
-    /// appid / GOG gameID / ключ записи Blizzard / платформа эмулятора (ps2, psp, …) / exe порта Recomp
+    /// appid / GOG gameID / ключ записи Blizzard / платформа эмулятора (ps2, psp, …) / exe порта Recomp /
+    /// имя папки игры
     pub id: String,
     pub name: String,
     /// Только Recomp: какие порты каталога подошли по признаку папки (слаги) и
@@ -184,6 +194,112 @@ static RECOMP_PATHS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 pub fn recomp_path(exe: &str) -> Option<String> {
     RECOMP_PATHS.lock().unwrap().as_ref()?.get(exe).cloned()
+}
+
+// ---------- Свои папки с играми ----------
+
+/// Добавленные папки как их указал человек, самая глубокая первой: вложенная
+/// папка (`D:\Games\DOS`) точнее той, что ее содержит (`D:\Games`).
+static GAME_DIRS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub const FOLDER_SOURCE: &str = "folder";
+/// Сторонние игры Steam: на сайте строка полки Steam со значком ярлыка (без
+/// подключенного Steam — полка GOG, как своя папка).
+pub const SHORTCUT_SOURCE: &str = "steamshortcut";
+
+fn has_game_dirs() -> bool {
+    !GAME_DIRS.lock().unwrap().is_empty()
+}
+
+pub fn set_game_dirs(dirs: &[String]) {
+    let mut v: Vec<String> = dirs.iter().map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect();
+    v.sort_by_key(|d| std::cmp::Reverse(parts(d).len()));
+    *GAME_DIRS.lock().unwrap() = v;
+}
+
+fn parts(p: &str) -> Vec<&str> {
+    p.split(['\\', '/']).filter(|c| !c.is_empty()).collect()
+}
+
+/// Какая игра из своих папок у exe: (имя папки игры, чистое название). Сравнение по
+/// частям пути без учета регистра — у кириллицы и прочего регистр меняет длину в байтах.
+pub fn folder_match(exe_path: &str) -> Option<(String, String)> {
+    let dirs = GAME_DIRS.lock().unwrap();
+    if dirs.is_empty() {
+        return None;
+    }
+    let path = parts(exe_path);
+    for dir in dirs.iter() {
+        let root = parts(dir);
+        if path.len() <= root.len() || !root.iter().zip(&path).all(|(a, b)| a.to_lowercase() == b.to_lowercase()) {
+            continue;
+        }
+        let folder = if path.len() == root.len() + 1 { *root.last()? } else { path[root.len()] };
+        return Some((folder.to_string(), clean_name(folder)));
+    }
+    None
+}
+
+/// Подпапки первого уровня своей папки — для окна: какие игры в ней узнаются.
+/// exe прямо в папке — она сама одна игра.
+pub fn folder_games(dir: &str) -> (bool, Vec<String>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return (false, Vec::new()) };
+    let mut subs = Vec::new();
+    let mut exe_here = false;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        match e.file_type() {
+            Ok(t) if t.is_dir() => subs.push(name),
+            Ok(t) if t.is_file() && name.to_lowercase().ends_with(".exe") => exe_here = true,
+            _ => {}
+        }
+    }
+    subs.sort_by_key(|n| n.to_lowercase());
+    (exe_here, subs)
+}
+
+/// Название игры по имени папки: без пометок раздач в скобках, версий, «GOG»,
+/// «Portable» и подчеркиваний. Ничего не осталось — имя папки как есть.
+pub fn clean_name(folder: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0;
+    for c in folder.chars() {
+        match c {
+            '[' | '(' | '{' => depth += 1,
+            ']' | ')' | '}' => depth = (depth - 1).max(0),
+            '_' if depth == 0 => out.push(' '),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    const NOISE: &[&str] = &["gog", "gog.com", "drm-free", "drmfree", "portable", "repack", "rip", "goty"];
+    let is_version = |w: &str| {
+        let w = w.strip_prefix(['v', 'V']).unwrap_or(w);
+        !w.is_empty() && w.chars().next().is_some_and(|c| c.is_ascii_digit())
+            && w.contains('.') && w.chars().all(|c| c.is_ascii_digit() || c == '.' || c.is_ascii_lowercase())
+    };
+    let words: Vec<&str> = out.split_whitespace()
+        .filter(|w| !NOISE.contains(&w.to_lowercase().as_str()) && !is_version(w))
+        .collect();
+    let name = words.join(" ").trim_matches(|c: char| c == '-' || c == '–' || c == '.' || c.is_whitespace()).to_string();
+    if name.is_empty() { folder.trim().to_string() } else { name }
+}
+
+/// Папки, которые нельзя добавить целиком: в них не только игры, и браузер или
+/// офис посчитались бы игрой. Возвращает, что сказать человеку.
+pub fn forbidden_dir(dir: &str) -> Option<&'static str> {
+    let d = norm_dir(dir);
+    if parts(&d).len() <= 1 {
+        return Some("целый диск добавить нельзя, укажите папку с играми");
+    }
+    let env = |k: &str| std::env::var(k).ok().map(|v| norm_dir(&v));
+    for k in ["WINDIR", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "APPDATA", "LOCALAPPDATA",
+              "USERPROFILE", "ProgramData"] {
+        if env(k).is_some_and(|e| e == d || (k == "WINDIR" && d.starts_with(&e))) {
+            return Some("в этой папке не только игры, укажите папку с играми внутри нее");
+        }
+    }
+    None
 }
 
 /// Не игры, хоть и лежат в папке игры.
@@ -356,12 +472,107 @@ fn battlenet(roots: &mut Vec<Root>, installed: &mut Vec<GameInfo>) {
     }
 }
 
+// ---------- Сторонние игры Steam (shortcuts.vdf) ----------
+
+/// Не игры, хоть их и добавляют в Steam: браузеры, оболочки, другие лаунчеры.
+/// Их папка стала бы игрой целиком.
+const SHORTCUT_NOT_GAMES: &[&str] = &[
+    "steam", "chrome", "msedge", "firefox", "opera", "brave", "vivaldi", "yandex", "explorer", "cmd",
+    "powershell", "pwsh", "wscript", "cscript", "conhost", "upc", "uplay", "eadesktop", "origin", "galaxyclient",
+    "playnite.desktopapp", "playnite.fullscreenapp", "heroic", "itch", "battle.net", "xboxpcapp", "gamebar",
+    "discord", "spotify", "obs64", "vlc", "mpc-hc64", "kodi", "parsecd", "moonlight", "steamlink",
+];
+
+/// Записи binary VDF (shortcuts.vdf): у каждой игры ключи в нижнем регистре →
+/// строки (числа не нужны). 0x00 — вложенная запись, 0x01 — строка,
+/// 0x02 — int32, 0x08 — конец записи.
+fn binary_vdf_entries(data: &[u8]) -> Vec<HashMap<String, String>> {
+    fn cstr(data: &[u8], pos: &mut usize) -> Option<String> {
+        let end = data.get(*pos..)?.iter().position(|&b| b == 0)? + *pos;
+        let s = String::from_utf8_lossy(&data[*pos..end]).to_string();
+        *pos = end + 1;
+        Some(s)
+    }
+    fn map(data: &[u8], pos: &mut usize, depth: usize, out: &mut Vec<HashMap<String, String>>) -> Option<()> {
+        let mut fields = HashMap::new();
+        loop {
+            let kind = *data.get(*pos)?;
+            *pos += 1;
+            if kind == 0x08 {
+                break;
+            }
+            let key = cstr(data, pos)?.to_lowercase();
+            match kind {
+                0x00 => map(data, pos, depth + 1, out)?,
+                0x01 => {
+                    fields.insert(key, cstr(data, pos)?);
+                }
+                0x02 | 0x04 => *pos += 4,
+                0x07 => *pos += 8,
+                _ => return None,
+            }
+        }
+        // Корень → «shortcuts» → «0», «1»…: игры на третьем уровне.
+        if depth == 2 {
+            out.push(fields);
+        }
+        Some(())
+    }
+    let mut out = Vec::new();
+    let mut pos = 0;
+    // Битый хвост файла не отменяет уже прочитанные игры.
+    let _ = map(data, &mut pos, 0, &mut out);
+    out
+}
+
+/// Сторонняя игра Steam → корень каталога: папка ее exe, название, которое
+/// человек дал ей в Steam. None — не игра (лаунчер, браузер, эмулятор, ярлык).
+fn shortcut_root(fields: &HashMap<String, String>) -> Option<Root> {
+    let name = fields.get("appname")?.trim().to_string();
+    let exe = fields.get("exe")?.trim().trim_matches('"').replace('/', "\\");
+    let exe_lower = exe.to_lowercase();
+    let file = exe_lower.rsplit('\\').next()?;
+    let (stem, ext) = file.rsplit_once('.')?;
+    if name.is_empty() || !matches!(ext, "exe" | "bat" | "cmd") || SHORTCUT_NOT_GAMES.contains(&stem)
+        || EMULATORS.iter().any(|(e, _, _)| *e == stem) || is_helper(file) {
+        return None;
+    }
+    let dir = PathBuf::from(&exe).parent()?.to_string_lossy().to_string();
+    if forbidden_dir(&dir).is_some() {
+        return None;
+    }
+    let info = GameInfo { source: SHORTCUT_SOURCE.into(), id: name.clone(), name, ..Default::default() };
+    Some(Root { dir: norm_dir(&dir), info })
+}
+
+/// Сторонние игры из Steam всех аккаунтов этого ПК (userdata\<id>\config\shortcuts.vdf).
+/// Steam не отдает их в Web API и не считает по ним время, так что считает приложение.
+/// Игра внутри папки, которую уже знает каталог (Steam, GOG, Battle.net), остается той игрой.
+fn steam_shortcuts(roots: &mut Vec<Root>, installed: &mut Vec<GameInfo>) {
+    let Some(base) = steam_path() else { return };
+    let Ok(users) = std::fs::read_dir(base.join("userdata")) else { return };
+    let mut seen = std::collections::HashSet::new();
+    for user in users.flatten() {
+        let Ok(data) = std::fs::read(user.path().join("config").join("shortcuts.vdf")) else { continue };
+        for fields in binary_vdf_entries(&data) {
+            let Some(root) = shortcut_root(&fields) else { continue };
+            if roots.iter().any(|r| root.dir.starts_with(&r.dir) || r.dir.starts_with(&root.dir))
+                || !seen.insert(root.info.name.to_lowercase()) {
+                continue;
+            }
+            installed.push(root.info.clone());
+            roots.push(root);
+        }
+    }
+}
+
 impl Catalog {
     pub fn load() -> Catalog {
         let mut cat = Catalog::default();
         steam(&mut cat.roots);
         gog(&mut cat.roots, &mut cat.installed);
         battlenet(&mut cat.roots, &mut cat.installed);
+        steam_shortcuts(&mut cat.roots, &mut cat.installed);
         // Самая длинная (самая точная) папка — первой.
         cat.roots.sort_by(|a, b| b.dir.len().cmp(&a.dir.len()));
         cat
@@ -466,7 +677,8 @@ mod sys {
 /// нужен — путь у живого pid не меняется.
 #[derive(Default)]
 pub struct Scanner {
-    paths: HashMap<u32, (String, Option<String>)>, // pid → (имя exe, путь в нижнем регистре)
+    // pid → (имя exe, путь в нижнем регистре, путь как есть — только при своих папках с играми)
+    paths: HashMap<u32, (String, Option<String>, Option<String>)>,
 }
 
 impl Scanner {
@@ -496,11 +708,13 @@ impl Scanner {
             if is_helper(&exe_lower) {
                 continue;
             }
-            let entry = self.paths.entry(pid).or_insert_with(|| {
-                (exe_lower.clone(), sys::image_path(pid).map(|p| p.to_lowercase()))
-            });
+            let with_path = |exe: &str| {
+                let path = sys::image_path(pid);
+                (exe.to_string(), path.as_ref().map(|p| p.to_lowercase()), path.filter(|_| has_game_dirs()))
+            };
+            let entry = self.paths.entry(pid).or_insert_with(|| with_path(&exe_lower));
             if entry.0 != exe_lower {
-                *entry = (exe_lower.clone(), sys::image_path(pid).map(|p| p.to_lowercase()));
+                *entry = with_path(&exe_lower);
             }
             if let Some(info) = entry.1.as_deref().and_then(|path| cat.by_path(path)) {
                 merge(&mut found, info.clone(), title, has_window);
@@ -510,6 +724,9 @@ impl Scanner {
                 }
                 let dir = entry.1.as_deref().map(dir_hash);
                 let info = GameInfo { source: "recomp".into(), id: stem.to_string(), name, ports, dir };
+                merge(&mut found, info, title, has_window);
+            } else if let Some((id, name)) = entry.2.as_deref().and_then(folder_match) {
+                let info = GameInfo { source: FOLDER_SOURCE.into(), id, name, ..Default::default() };
                 merge(&mut found, info, title, has_window);
             }
         }
@@ -572,5 +789,82 @@ mod tests {
         assert_eq!(dir_hash(r"c:\a\x.exe"), dir_hash(r"c:\a\y.exe"));
         assert_ne!(dir_hash(r"c:\a\x.exe"), dir_hash(r"c:\b\x.exe"));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn folder_games_by_first_level_subfolder() {
+        set_game_dirs(&[r"D:\Games".into(), r"d:\games\DOS\".into(), r"E:\Fallout2".into()]);
+        assert_eq!(folder_match(r"D:\Games\Fallout 2\bin\x64\fallout2.exe"),
+                   Some(("Fallout 2".into(), "Fallout 2".into())));
+        // Вложенная добавленная папка точнее: игра — ее подпапка, а не «DOS».
+        assert_eq!(folder_match(r"D:\GAMES\DOS\Doom\doom.exe").map(|m| m.0), Some("Doom".into()));
+        // exe прямо в добавленной папке — она сама игра.
+        assert_eq!(folder_match(r"e:\fallout2\fallout2.exe").map(|m| m.0), Some("Fallout2".into()));
+        assert_eq!(folder_match(r"D:\Другое\Игра\game.exe"), None);
+        assert_eq!(folder_match(r"D:\Gamesx\a\b.exe"), None);
+        set_game_dirs(&[r"D:\Игры".into()]);
+        assert_eq!(folder_match(r"d:\ИГРЫ\Ведьмак\witcher.exe").map(|m| m.0), Some("Ведьмак".into()));
+        set_game_dirs(&[]);
+    }
+
+    #[test]
+    fn steam_shortcuts_parsed() {
+        fn entry(i: &str, fields: &[(&str, &str)]) -> Vec<u8> {
+            let mut v = vec![0x00];
+            v.extend(i.as_bytes());
+            v.push(0);
+            v.push(0x02);
+            v.extend(b"appid\0");
+            v.extend(7u32.to_le_bytes());
+            for (k, val) in fields {
+                v.push(0x01);
+                v.extend(k.as_bytes());
+                v.push(0);
+                v.extend(val.as_bytes());
+                v.push(0);
+            }
+            v.push(0x00);
+            v.extend(b"tags\0");
+            v.extend(b"\x010\0favorite\0");
+            v.push(0x08);
+            v.push(0x08);
+            v
+        }
+        let mut data = vec![0x00];
+        data.extend(b"shortcuts\0");
+        data.extend(entry("0", &[("AppName", "Fallout 2"), ("Exe", r#""D:\Old\Fallout2\fallout2.exe""#)]));
+        data.extend(entry("1", &[("appname", "Chrome"), ("exe", r#""C:\Apps\Chrome\chrome.exe""#)]));
+        data.extend(entry("2", &[("AppName", "Doom"), ("Exe", r"D:\Old\dosbox\doom.bat")]));
+        data.extend(entry("3", &[("AppName", "Store"), ("Exe", r#""steam://rungameid/1""#)]));
+        data.extend([0x08, 0x08]);
+        let entries = binary_vdf_entries(&data);
+        assert_eq!(entries.len(), 4);
+        let roots: Vec<Root> = entries.iter().filter_map(shortcut_root).collect();
+        let got: Vec<(&str, &str)> = roots.iter().map(|r| (r.dir.as_str(), r.info.name.as_str())).collect();
+        assert_eq!(got, vec![(r"d:\old\fallout2\", "Fallout 2"), (r"d:\old\dosbox\", "Doom")]);
+        assert_eq!(roots[0].info.source, SHORTCUT_SOURCE);
+        // Обрезанный файл: что успели прочитать, то и есть.
+        assert_eq!(binary_vdf_entries(&data[..data.len() / 2]).len(), 1);
+    }
+
+    #[test]
+    fn folder_name_cleaned() {
+        assert_eq!(clean_name("Jagged_Alliance_2 [GOG]"), "Jagged Alliance 2");
+        assert_eq!(clean_name("Heroes of Might and Magic 3 (v4.0) GOG"), "Heroes of Might and Magic 3");
+        assert_eq!(clean_name("Blood v1.21 Portable"), "Blood");
+        assert_eq!(clean_name("Diablo 2"), "Diablo 2");
+        assert_eq!(clean_name("S.T.A.L.K.E.R. Shadow of Chernobyl"), "S.T.A.L.K.E.R. Shadow of Chernobyl");
+        assert_eq!(clean_name("[GOG]"), "[GOG]");
+    }
+
+    #[test]
+    fn whole_disk_and_system_folders_refused() {
+        assert!(forbidden_dir(r"D:\").is_some());
+        assert!(forbidden_dir(r"C:\Windows\System32").is_some());
+        if let Ok(pf) = std::env::var("ProgramFiles") {
+            assert!(forbidden_dir(&pf).is_some());
+            assert!(forbidden_dir(&format!(r"{pf}\Games")).is_none());
+        }
+        assert!(forbidden_dir(r"D:\Games").is_none());
     }
 }
